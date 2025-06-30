@@ -1,0 +1,21 @@
+name: zebra_env
+channels:
+  - defaults
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - jupyter
+  - biopython
+  - sra-tools
+  - bedtools
+  - samtools
+  - pip
+  - polars
+  - pip:
+      - ipykernel
