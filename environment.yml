@@ -17,5 +17,6 @@ dependencies:
   - samtools
   - pip
   - polars
+  - nbstripout
   - pip:
       - ipykernel
