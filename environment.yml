@@ -18,5 +18,6 @@ dependencies:
   - pip
   - polars
   - nbstripout
+  - torch
   - pip:
       - ipykernel
