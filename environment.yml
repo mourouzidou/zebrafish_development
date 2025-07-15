@@ -18,6 +18,8 @@ dependencies:
   - pip
   - polars
   - nbstripout
-  - torch
   - pip:
       - ipykernel
+      - torch
+      - torchvision
+      - torchaudio
