@@ -8,14 +8,17 @@ import matplotlib.pyplot as plt
 import os
 os.environ["TORCH_JIT_DISABLE_ONEDNN_FUSION"] = "1"
 
-# ---------------- Safer One-Hot Encoding ---------------- #
 def one_hot_encode(sequence):
-    mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
-    arr = np.zeros((len(sequence), 4), dtype=np.float32)
-    for i, char in enumerate(sequence):
-        if char in mapping:
-            arr[i, mapping[char]] = 1.0
-    return arr
+    # Convert sequence to one-hot encoding with N handling
+    seq_array = np.array(list(sequence))[:, None]
+    bases = np.array(list('ACGT'))
+    one_hot = (seq_array == bases).astype(np.float32)
+    
+    # Handle N bases by setting equal probability for all bases
+    n_mask = seq_array.flatten() == 'N'
+    one_hot[n_mask] = 0.25
+    
+    return one_hot
 
 def reverse_complement_tensor(x):
     rev_x = torch.flip(x, dims=[2])
@@ -95,13 +98,12 @@ class ATACSeqCNN(nn.Module):
         x = x.reshape(x.size(0), -1)
         return self.classifier(x)
 
-# ---------------- Helper Functions ---------------- #
-def pearson_corr_general(x, y, dim):
-    x_centered = x - x.mean(dim=dim, keepdim=True)
-    y_centered = y - y.mean(dim=dim, keepdim=True)
-    numerator = (x_centered * y_centered).sum(dim=dim)
-    denominator = torch.sqrt((x_centered ** 2).sum(dim=dim)) * torch.sqrt((y_centered ** 2).sum(dim=dim))
-    return (numerator / (denominator + 1e-8)).mean(dim=dim)
+def pearson_corr_general(x, y):
+    vx = x - torch.mean(x)
+    vy = y - torch.mean(y)
+    corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8)
+    return corr
+
 
 def mean_pearson_correlation(loader, model, device, dim=1):
     model.eval()
@@ -114,15 +116,20 @@ def mean_pearson_correlation(loader, model, device, dim=1):
             all_targets.append(batch_y.cpu())
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
+    # if dim == 0:
+    #     return np.mean([pearson_corr_general(all_preds[:, i], all_targets[:, i], dim=0).item() for i in range(all_preds.shape[1])])
+    # else:
+    #     return np.mean([pearson_corr_general(all_preds[i], all_targets[i], dim=0).item() for i in range(all_preds.shape[0])])
+
     if dim == 0:
-        return np.mean([pearson_corr_general(all_preds[:, i], all_targets[:, i], dim=0).item() for i in range(all_preds.shape[1])])
+        return np.mean([pearson_corr_general(all_preds[:, i], all_targets[:, i]).item() for i in range(all_preds.shape[1])])
     else:
-        return np.mean([pearson_corr_general(all_preds[i], all_targets[i], dim=0).item() for i in range(all_preds.shape[0])])
+        return np.mean([pearson_corr_general(all_preds[i], all_targets[i]).item() for i in range(all_preds.shape[0])])
 
 def load_and_split_data(csv_path, sequence_length):
     df = pd.read_csv(csv_path)
     df = df[df['sequence'].apply(lambda x: isinstance(x, str) and len(x) == sequence_length)].reset_index(drop=True)
-    y = np.log1p(df.iloc[:, 0:-4].to_numpy(dtype=np.float32))  
+    y = df.iloc[:, 0:-4].to_numpy(dtype=np.float32)
     X = np.stack([one_hot_encode(seq) for seq in df['sequence']])
     X_tensor = torch.tensor(X).permute(0, 2, 1)
     y_tensor = torch.tensor(y)
@@ -136,9 +143,9 @@ def load_and_split_data(csv_path, sequence_length):
 # ---------------- Training Loop ---------------- #
 if __name__ == "__main__":
     sequence_length = 2000
-    model_name = "dilated_baseline_model"
+    model_name = "dilated_baseline_model_raw"
     dataset_path = f"data/embryo/processed/atac_peaks_with_sequences_{sequence_length}.csv"
-    output_dir = f"src/models/outputs/{model_name}_{sequence_length}"
+    output_dir = f"src/models/outputs/{model_name}_{sequence_length}_raw"
     os.makedirs(output_dir, exist_ok=True)
 
     df = pd.read_csv(dataset_path)
@@ -155,12 +162,30 @@ if __name__ == "__main__":
     criterion = nn.PoissonNLLLoss(log_input=False)
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
+    # Get initial validation metrics before training
+    model.eval()
+    initial_val_loss = 0.0
+    with torch.no_grad():
+        for batch_X, batch_y in val_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            initial_val_loss += criterion(model(batch_X), batch_y).item()
+    initial_val_loss /= len(val_loader)
+    
+    initial_corr_seq = mean_pearson_correlation(val_loader, model, device, dim=1)
+    initial_corr_type = mean_pearson_correlation(val_loader, model, device, dim=0)
+
     best_corr_sum = -float('inf')
     patience_counter = 0
     early_stopping_patience = 10
     num_epochs = 300
 
-    train_losses, val_losses, val_corrs_seq, val_corrs_type = [], [], [], []
+    # Initialize lists with initial values
+    train_losses = []
+    val_losses = [initial_val_loss]
+    val_corrs_seq = [initial_corr_seq]
+    val_corrs_type = [initial_corr_type]
+
+    print(f"Initial - Val Loss: {initial_val_loss:.4f} - Corr (Seq): {initial_corr_seq:.4f} - Corr (Type): {initial_corr_type:.4f}")
 
     for epoch in range(num_epochs):
         model.train()
@@ -204,16 +229,24 @@ if __name__ == "__main__":
                 print("Early stopping triggered.")
                 break
 
+    # Create x-axis for plots (including initial point at epoch 0)
+    epochs_range = list(range(len(train_losses)))
+    epochs_range_val = list(range(len(val_losses)))
+
     plt.figure()
-    plt.plot(train_losses, label="Train Loss")
-    plt.plot(val_losses, label="Val Loss")
+    plt.plot(epochs_range, train_losses, label="Train Loss")
+    plt.plot(epochs_range_val, val_losses, label="Val Loss")
     plt.title(f"{model_name} | Loss Curves | {sequence_length}bp")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.legend()
     plt.savefig(os.path.join(output_dir, f"training_curve_{sequence_length}bp.png"))
 
     plt.figure()
-    plt.plot(val_corrs_seq, label="Corr (Sequence)")
-    plt.plot(val_corrs_type, label="Corr (Cell Type)")
+    plt.plot(epochs_range_val, val_corrs_seq, label="Corr (Sequence)")
+    plt.plot(epochs_range_val, val_corrs_type, label="Corr (Cell Type)")
     plt.title(f"{model_name} | Correlation Curves | {sequence_length}bp")
+    plt.xlabel("Epoch")
+    plt.ylabel("Correlation")
     plt.legend()
     plt.savefig(os.path.join(output_dir, f"validation_correlation_curve_{sequence_length}bp.png"))
