@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from utils.preprocess import reverse_complement_tensor
 
 class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
