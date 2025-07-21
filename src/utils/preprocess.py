@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.preprocessing import quantile_transform
+import scipy.stats
 
 def one_hot_encode(sequence):
     seq_array = np.array(list(sequence))[:, None]
@@ -20,66 +20,69 @@ def reverse_complement_tensor(x):
 def log_transform(arr):
     return np.log1p(arr)
 
-def quantile_normalize(arr):
-    # Apply quantile normalization to each column (cell type)
-    return quantile_transform(arr, axis=0, output_distribution='normal', copy=True)
+
+def custom_quantile_transform(data):
+    """Version 4: True uniform using unique values"""
+    transformed = np.zeros_like(data)
+    
+    for i in range(data.shape[1]):
+        column_data = data[:, i]
+        
+        # Get unique values and their positions
+        unique_vals, inverse_indices = np.unique(column_data, return_inverse=True)
+        n_unique = len(unique_vals)
+        
+        # Create uniform spacing for unique values
+        uniform_vals = np.linspace(0, 1, n_unique)
+        
+        # Map back to original positions
+        transformed[:, i] = uniform_vals[inverse_indices]
+    
+    return transformed
 
 
-def plot_rawVStrans(arr_raw, arr_trans, column_names, output_dir=None):
-    num_columns = arr_raw.shape[1]
-    x = np.arange(num_columns)
-    width = 0.4
+def quantile_normalize(arr, distribution='uniform'):
+    return quantile_transform(arr, axis=0, output_distribution=distribution, copy=True)
 
-    raw_means = np.mean(arr_raw, axis=0)
-    raw_stds = np.std(arr_raw, axis=0)
-    trans_means = np.mean(arr_trans, axis=0)
-    trans_stds = np.std(arr_trans, axis=0)
+def get_feature_cols(df, drop_n_last_cols=5):
+    # Returns feature columns (targets), not metadata
+    return df.columns[:-drop_n_last_cols]
 
-    plt.figure(figsize=(15, 6))
-    plt.bar(x - width / 2, raw_means, width, yerr=raw_stds, label='Raw', alpha=0.7, capsize=5)
-    plt.bar(x + width / 2, trans_means, width, yerr=trans_stds, label='Transformed', alpha=0.7, capsize=5)
-
-    plt.xticks(x, column_names, rotation=45, ha='right')
-    plt.ylabel('Values')
-    plt.title('Distribution of Target Values Before and After Transformation')
-    plt.legend()
-
-    if output_dir:
-        plt.savefig(f"{output_dir}/distribution_comparison.png", bbox_inches='tight')
-    else:
-        plt.show()
 def load_and_split_data(
-    csv_path, sequence_length, 
+    csv_path, 
+    sequence_length, 
     log_transform_flag=False,
     normalize=None,
     drop_n_last_cols=5,
-    plot_norm=False,
-    output_dir=None
+    train_frac=0.7,
+    val_frac=0.15,
+    test_frac=0.15
 ):
     df = pd.read_csv(csv_path)
     df = df[df['sequence'].apply(lambda x: isinstance(x, str) and len(x) == sequence_length)].reset_index(drop=True)
-    feature_cols = df.columns[:-drop_n_last_cols]
-    y_raw = df[feature_cols].to_numpy(dtype=np.float32)  # Save raw copy for plotting
-
+    feature_cols = get_feature_cols(df, drop_n_last_cols)
+    y_raw = df[feature_cols].to_numpy(dtype=np.float32)
     y = y_raw.copy()
-    transformed = False
-
     if log_transform_flag:
         y = log_transform(y)
-        transformed = True
-
     if normalize == "quantile":
-        y = quantile_normalize(y)
-        transformed = True
-    if plot_norm and transformed:
-        plot_rawVStrans(y_raw, y, feature_cols, output_dir=output_dir)
-
+        y = custom_quantile_transform(y)
     X = np.stack([one_hot_encode(seq) for seq in df['sequence']])
     X_tensor = torch.tensor(X).permute(0, 2, 1)
     y_tensor = torch.tensor(y)
     chroms = df['chromosome'].unique()
     np.random.shuffle(chroms)
-    split_idx = int(len(chroms) * 0.8)
-    train_mask = df['chromosome'].isin(chroms[:split_idx]).values
-    val_mask = df['chromosome'].isin(chroms[split_idx:]).values
-    return X_tensor[train_mask], X_tensor[val_mask], y_tensor[train_mask], y_tensor[val_mask], df
+    n = len(chroms)
+    train_end = int(n * train_frac)
+    val_end = train_end + int(n * val_frac)
+    train_chroms = chroms[:train_end]
+    val_chroms = chroms[train_end:val_end]
+    test_chroms = chroms[val_end:]
+    train_mask = df['chromosome'].isin(train_chroms).values
+    val_mask = df['chromosome'].isin(val_chroms).values
+    test_mask = df['chromosome'].isin(test_chroms).values
+    return (
+        X_tensor[train_mask], X_tensor[val_mask], X_tensor[test_mask],
+        y_tensor[train_mask], y_tensor[val_mask], y_tensor[test_mask],
+        y_raw, y, 
+    )
