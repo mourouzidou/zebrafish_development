@@ -85,21 +85,23 @@ def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_typ
         x_labels = cols_filtered
     
     def _plot(df, subtitle, use_single_color=False):
-        plt.figure(figsize=(20, 12))
+        plt.figure(figsize=(32, 12))  # wider
         if use_single_color:
-            # Use single gray color for quantile normalized data
             ax = sns.boxplot(data=df[cols_filtered], color='lightgray')
         else:
-            # Use different colors for each cell type
             ax = sns.boxplot(data=df[cols_filtered], palette=box_colors)
         ax.set_title(f"{title_prefix}: {subtitle}")
         ax.set_xlabel("Pseudobulk")
         ax.set_ylabel("log2(Accessibility + 1)")
-        ax.set_xticklabels(x_labels, rotation=15, ha='right', fontsize=8)
-        plt.xticks(rotation=20, ha='right')
+        ax.set_xticklabels(
+            x_labels, 
+            rotation=45,    # more rotation!
+            ha='right', 
+            fontsize=6      # smaller font size
+        )
         plt.tight_layout()
         plt.show()
-    
+
     # Plot both versions with consistent filtering
     _plot(df_raw_log2, "Raw ×1000 then log2(x+1)", use_single_color=False)
     _plot(df_quant_log2, "Quantile Normalized then ×1000 and log2(x+1)", use_single_color=True)
