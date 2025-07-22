@@ -43,32 +43,41 @@ def load_and_preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5)
     df_quant_log2 = pd.DataFrame(y_quant_log2, columns=feature_cols)
 
     return df_raw_log2, df_quant_log2
-def plot_distributions(df_raw_log2, df_quant_log2):
+
+def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_type_filter=None):
     cols = df_raw_log2.columns
-
-    # Extract cell type from column names (second part after splitting by '_')
+    
     cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols]
-    unique_cell_types = list(dict.fromkeys(cell_types))  # preserve order
-
-    # Assign colors to each cell type
-    palette = dict(zip(unique_cell_types, sns.color_palette("tab20", len(unique_cell_types))))
-    box_colors = [palette[ct] for ct in cell_types]
-
-    # Function to plot with better label handling
-    def _plot(df, title):
-        plt.figure(figsize=(20, 10))  # wider figure
-        ax = sns.boxplot(data=df[cols], palette=box_colors)
-        ax.set_title(title)
-        ax.set_xlabel("Cell Type")
+    
+    if cell_type_filter is not None:
+        filtered_indices = [i for i, ct in enumerate(cell_types) if ct in cell_type_filter]
+        cols_filtered = cols[filtered_indices]
+        cell_types_filtered = [cell_types[i] for i in filtered_indices]
+    else:
+        cols_filtered = cols
+        cell_types_filtered = cell_types
+    
+    # Get unique cell types and assign colors
+    unique_cell_types = list(dict.fromkeys(cell_types_filtered))  # preserve order
+    palette = dict(zip(unique_cell_types, sns.color_palette("tab20c", len(unique_cell_types))))
+    box_colors = [palette[ct] for ct in cell_types_filtered]
+    
+    def _plot(df, subtitle, use_single_color=False):
+        plt.figure(figsize=(20, 10))
+        if use_single_color:
+            # Use single gray color for quantile normalized data
+            ax = sns.boxplot(data=df[cols_filtered], color='lightgray')
+        else:
+            # Use different colors for each cell type
+            ax = sns.boxplot(data=df[cols_filtered], palette=box_colors)
+        ax.set_title(f"{title_prefix}: {subtitle}")
+        ax.set_xlabel("Pseudobulk")
         ax.set_ylabel("log2(Accessibility + 1)")
-
-        # Improve x-tick visibility
         ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right', fontsize=8)
-
-        # Optional: add grid or spacing
         plt.xticks(rotation=35, ha='right')
         plt.tight_layout()
         plt.show()
-
-    _plot(df_raw_log2, "Raw ×1000 then log2(x+1)")
-    _plot(df_quant_log2, "Quantile Normalized then ×1000 and log2(x+1)")
+    
+    # Plot both versions with consistent filtering
+    _plot(df_raw_log2, "Raw ×1000 then log2(x+1)", use_single_color=False)
+    _plot(df_quant_log2, "Quantile Normalized then ×1000 and log2(x+1)", use_single_color=True)
