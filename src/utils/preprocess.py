@@ -1,8 +1,8 @@
 import numpy as np
-import torch
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.preprocessing import quantile_transform
-import scipy.stats
 
 def one_hot_encode(sequence):
     seq_array = np.array(list(sequence))[:, None]
@@ -12,77 +12,63 @@ def one_hot_encode(sequence):
     one_hot[n_mask] = 0.25
     return one_hot
 
-def reverse_complement_tensor(x):
-    rev_x = torch.flip(x, dims=[2])
-    rev_x = rev_x[:, [3, 2, 1, 0], :]
-    return rev_x
-
-def log_transform(arr):
-    return np.log1p(arr)
+def log2_transform(arr, scale=1000):
+    return np.log2(arr * scale + 1)
 
 
-def custom_quantile_transform(data):
-    """Version 4: True uniform using unique values"""
-    transformed = np.zeros_like(data)
-    
-    for i in range(data.shape[1]):
-        column_data = data[:, i]
-        
-        # Get unique values and their positions
-        unique_vals, inverse_indices = np.unique(column_data, return_inverse=True)
-        n_unique = len(unique_vals)
-        
-        # Create uniform spacing for unique values
-        uniform_vals = np.linspace(0, 1, n_unique)
-        
-        # Map back to original positions
-        transformed[:, i] = uniform_vals[inverse_indices]
-    
-    return transformed
-
-
-def quantile_normalize(arr, distribution='uniform'):
-    return quantile_transform(arr, axis=0, output_distribution=distribution, copy=True)
+def quantile_normalize(x, axis=0):
+    sorted_x = np.sort(x, axis=axis)
+    meanx = np.mean(sorted_x, axis=axis-1)
+    xqtrl = meanx[np.argsort(np.argsort(x, axis=axis), axis=axis)]
+    return xqtrl
 
 def get_feature_cols(df, drop_n_last_cols=5):
-    # Returns feature columns (targets), not metadata
     return df.columns[:-drop_n_last_cols]
 
-def load_and_split_data(
-    csv_path, 
-    sequence_length, 
-    log_transform_flag=False,
-    normalize=None,
-    drop_n_last_cols=5,
-    train_frac=0.7,
-    val_frac=0.15,
-    test_frac=0.15
-):
+def load_and_preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5):
     df = pd.read_csv(csv_path)
     df = df[df['sequence'].apply(lambda x: isinstance(x, str) and len(x) == sequence_length)].reset_index(drop=True)
+    
+    # Get features (accessibility)
     feature_cols = get_feature_cols(df, drop_n_last_cols)
     y_raw = df[feature_cols].to_numpy(dtype=np.float32)
-    y = y_raw.copy()
-    if log_transform_flag:
-        y = log_transform(y)
-    if normalize == "quantile":
-        y = custom_quantile_transform(y)
-    X = np.stack([one_hot_encode(seq) for seq in df['sequence']])
-    X_tensor = torch.tensor(X).permute(0, 2, 1)
-    y_tensor = torch.tensor(y)
-    chroms = df['chromosome'].unique()
-    np.random.shuffle(chroms)
-    n = len(chroms)
-    train_end = int(n * train_frac)
-    val_end = train_end + int(n * val_frac)
-    train_chroms = chroms[:train_end]
-    val_chroms = chroms[train_end:val_end]
-    test_chroms = chroms[val_end:]
-    train_mask = df['chromosome'].isin(train_chroms).values
-    val_mask = df['chromosome'].isin(val_chroms).values
-    test_mask = df['chromosome'].isin(test_chroms).values
-    return (
-        X_tensor[train_mask], X_tensor[val_mask], X_tensor[test_mask],
-        y_tensor[train_mask], y_tensor[val_mask], y_tensor[test_mask],
-        y_raw, y, 
-    )
+    
+    # Normalize and log transform
+    y_quant_norm = quantile_normalize(y_raw)
+    y_raw_log2 = log2_transform(y_raw)
+    y_quant_log2 = log2_transform(y_quant_norm)
+    
+    # Prepare for plotting
+    df_raw_log2 = pd.DataFrame(y_raw_log2, columns=feature_cols)
+    df_quant_log2 = pd.DataFrame(y_quant_log2, columns=feature_cols)
+
+    return df_raw_log2, df_quant_log2
+def plot_distributions(df_raw_log2, df_quant_log2):
+    cols = df_raw_log2.columns
+
+    # Extract cell type from column names (second part after splitting by '_')
+    cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols]
+    unique_cell_types = list(dict.fromkeys(cell_types))  # preserve order
+
+    # Assign colors to each cell type
+    palette = dict(zip(unique_cell_types, sns.color_palette("tab20", len(unique_cell_types))))
+    box_colors = [palette[ct] for ct in cell_types]
+
+    # Function to plot with better label handling
+    def _plot(df, title):
+        plt.figure(figsize=(20, 10))  # wider figure
+        ax = sns.boxplot(data=df[cols], palette=box_colors)
+        ax.set_title(title)
+        ax.set_xlabel("Cell Type")
+        ax.set_ylabel("log2(Accessibility + 1)")
+
+        # Improve x-tick visibility
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right', fontsize=8)
+
+        # Optional: add grid or spacing
+        plt.xticks(rotation=35, ha='right')
+        plt.tight_layout()
+        plt.show()
+
+    _plot(df_raw_log2, "Raw ×1000 then log2(x+1)")
+    _plot(df_quant_log2, "Quantile Normalized then ×1000 and log2(x+1)")
