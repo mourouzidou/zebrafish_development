@@ -44,17 +44,33 @@ def load_and_preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5)
 
     return df_raw_log2, df_quant_log2
 
-def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_type_filter=None):
+
+def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None):
+
     cols = df_raw_log2.columns
     
-    cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols]
+    # Sort columns by time point (first part before '_')
+    def get_time_point(col_name):
+        parts = col_name.split('_')
+        if len(parts) > 1:
+            try:
+                return int(parts[0])
+            except ValueError:
+                return 0  # fallback for non-numeric time points
+        return 0
     
+    cols_sorted = sorted(cols, key=lambda x: (get_time_point(x), x))
+    
+    cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols_sorted]
+    
+    # Apply cell type filtering if specified
     if cell_type_filter is not None:
+        # Find columns that match the filtered cell types
         filtered_indices = [i for i, ct in enumerate(cell_types) if ct in cell_type_filter]
-        cols_filtered = cols[filtered_indices]
+        cols_filtered = [cols_sorted[i] for i in filtered_indices]
         cell_types_filtered = [cell_types[i] for i in filtered_indices]
     else:
-        cols_filtered = cols
+        cols_filtered = cols_sorted
         cell_types_filtered = cell_types
     
     # Get unique cell types and assign colors
@@ -62,8 +78,14 @@ def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_typ
     palette = dict(zip(unique_cell_types, sns.color_palette("tab20c", len(unique_cell_types))))
     box_colors = [palette[ct] for ct in cell_types_filtered]
     
+    # Create labels with cell counts if provided
+    if pseudobulk_counts is not None:
+        x_labels = [f"{col}\n(n={pseudobulk_counts.get(col, 0)})" for col in cols_filtered]
+    else:
+        x_labels = cols_filtered
+    
     def _plot(df, subtitle, use_single_color=False):
-        plt.figure(figsize=(20, 10))
+        plt.figure(figsize=(20, 12))
         if use_single_color:
             # Use single gray color for quantile normalized data
             ax = sns.boxplot(data=df[cols_filtered], color='lightgray')
@@ -73,8 +95,8 @@ def plot_distributions(df_raw_log2, df_quant_log2, title_prefix="Data", cell_typ
         ax.set_title(f"{title_prefix}: {subtitle}")
         ax.set_xlabel("Pseudobulk")
         ax.set_ylabel("log2(Accessibility + 1)")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right', fontsize=8)
-        plt.xticks(rotation=35, ha='right')
+        ax.set_xticklabels(x_labels, rotation=15, ha='right', fontsize=8)
+        plt.xticks(rotation=20, ha='right')
         plt.tight_layout()
         plt.show()
     
