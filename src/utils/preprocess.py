@@ -46,22 +46,21 @@ def preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5, scale=0,
     df_quant = pd.DataFrame(y_quant_processed, columns=feature_cols)
 
     return df_raw, df_quant
+def plot_distributions(
+    df_raw, df_quant, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None
+):
+    cols = list(df_raw.columns)
 
-def plot_distributions(df_raw, df_quant, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None):
-    cols = df_raw.columns
-    
-    def get_time_point(col_name):
-        parts = col_name.split('_')
-        if len(parts) > 1:
-            try:
-                return int(parts[0])
-            except ValueError:
-                return 0
-        return 0
-    
-    cols_sorted = sorted(cols, key=lambda x: (get_time_point(x), x))
+    # Always sort by cell count (descending), ignore stage/time entirely
+    if pseudobulk_counts is not None:
+        cols_sorted = sorted(cols, key=lambda x: -pseudobulk_counts.get(x, 0))
+    else:
+        cols_sorted = cols  # No sorting if counts are missing
+
+    # Cell type for each column (still for coloring)
     cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols_sorted]
-    
+
+    # Filter if specified
     if cell_type_filter is not None:
         filtered_indices = [i for i, ct in enumerate(cell_types) if ct in cell_type_filter]
         cols_filtered = [cols_sorted[i] for i in filtered_indices]
@@ -69,16 +68,17 @@ def plot_distributions(df_raw, df_quant, title_prefix="Data", cell_type_filter=N
     else:
         cols_filtered = cols_sorted
         cell_types_filtered = cell_types
-    
+
     unique_cell_types = list(dict.fromkeys(cell_types_filtered))
+    import seaborn as sns
     palette = dict(zip(unique_cell_types, sns.color_palette("tab20c", len(unique_cell_types))))
     box_colors = [palette[ct] for ct in cell_types_filtered]
-    
+
     if pseudobulk_counts is not None:
         x_labels = [f"{col}\n(n={pseudobulk_counts.get(col, 0)})" for col in cols_filtered]
     else:
         x_labels = cols_filtered
-    
+
     def _plot(df, subtitle, use_single_color=False):
         plt.figure(figsize=(32, 12))
         if use_single_color:
