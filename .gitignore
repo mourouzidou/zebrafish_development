@@ -1,8 +1,8 @@
 # Data directories (too large for GitHub)
-data/
-!data/embryo/
+data/*
 !data/embryo/plots/
 !data/embryo/plots/**
+
 src/models/outputs/
 
 # Notebook outputs and checkpoints

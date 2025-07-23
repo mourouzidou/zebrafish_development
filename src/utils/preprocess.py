@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 import seaborn as sns
 from sklearn.preprocessing import quantile_transform
 
@@ -46,18 +46,20 @@ def preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5, scale=0,
     df_quant = pd.DataFrame(y_quant_processed, columns=feature_cols)
 
     return df_raw, df_quant
+    
+
 def plot_distributions(
-    df_raw, df_quant, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None
-):
+    df_raw, df_quant, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None, save_dir=None):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
     cols = list(df_raw.columns)
 
-    # Always sort by cell count (descending), ignore stage/time entirely
     if pseudobulk_counts is not None:
         cols_sorted = sorted(cols, key=lambda x: -pseudobulk_counts.get(x, 0))
     else:
-        cols_sorted = cols  # No sorting if counts are missing
+        cols_sorted = cols  
 
-    # Cell type for each column (still for coloring)
+    # Cell type for each column (for coloring)
     cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols_sorted]
 
     # Filter if specified
@@ -70,7 +72,6 @@ def plot_distributions(
         cell_types_filtered = cell_types
 
     unique_cell_types = list(dict.fromkeys(cell_types_filtered))
-    import seaborn as sns
     palette = dict(zip(unique_cell_types, sns.color_palette("tab20c", len(unique_cell_types))))
     box_colors = [palette[ct] for ct in cell_types_filtered]
 
@@ -79,7 +80,7 @@ def plot_distributions(
     else:
         x_labels = cols_filtered
 
-    def _plot(df, subtitle, use_single_color=False):
+    def _plot(df, subtitle, use_single_color=False, fname=None):
         plt.figure(figsize=(32, 12))
         if use_single_color:
             ax = sns.boxplot(data=df[cols_filtered], color='lightgray')
@@ -90,7 +91,19 @@ def plot_distributions(
         ax.set_ylabel("log2(Accessibility + 1)")
         ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=6)
         plt.tight_layout()
-        plt.show()
+        if fname:
+            plt.savefig(fname, dpi=150)
+            plt.close()
+        else:
+            plt.show()
 
-    _plot(df_raw, "Raw", use_single_color=False)
-    _plot(df_quant, "Quantile Normalized", use_single_color=True)
+    if save_dir:
+        import os
+        prefix = title_prefix.lower().replace(" ", "_")
+        fname_raw = f"{save_dir}/{prefix}_raw_log2_boxplot.png"
+        fname_quant = f"{save_dir}/{prefix}_quantile_log2_boxplot.png"
+    else:
+        fname_raw = fname_quant = None
+
+    _plot(df_raw, "Raw", use_single_color=False, fname=fname_raw)
+    _plot(df_quant, "Quantile Normalized", use_single_color=True, fname=fname_quant)
