@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt 
 import seaborn as sns
 from sklearn.preprocessing import quantile_transform
+from Bio import SeqIO
+from pathlib import Path
 
 def one_hot_encode(sequence):
     seq_array = np.array(list(sequence))[:, None]
@@ -107,3 +109,75 @@ def plot_distributions(
 
     _plot(df_raw, "Raw", use_single_color=False, fname=fname_raw)
     _plot(df_quant, "Quantile Normalized", use_single_color=True, fname=fname_quant)
+
+
+
+
+def extract_centered_sequences(df, fasta_dir, expansion_length=None, save_dir="../../data/embryo/processed"):
+    chr_seqs = {}
+    sequences = []
+    chrom_ints = []
+
+    for idx, row in df.iterrows():
+        chrom_raw = str(row['chromosome'])  # convert to string first
+        chrom_str = chrom_raw.replace("chr", "")
+        chrom = int(chrom_str) if chrom_str.isdigit() else chrom_str
+
+        chrom = int(chrom_str) if chrom_str.isdigit() else chrom_str  # handles "MT" or "X"
+        start, end = int(row['start']), int(row['end'])
+
+        fasta_chrom_key = str(chrom)  # filenames still use string format
+        if fasta_chrom_key not in chr_seqs:
+            fasta_path = Path(fasta_dir) / f"Danio_rerio.GRCz11.dna.chromosome.{fasta_chrom_key}.fa"
+            record = next(SeqIO.parse(fasta_path, "fasta"))
+            chr_seqs[fasta_chrom_key] = record.seq
+
+        if expansion_length:
+            center = (start + end) // 2
+            half_len = expansion_length // 2
+            start = max(0, center - half_len)
+            end = center + half_len
+
+        seq = chr_seqs[fasta_chrom_key][start:end]
+        seq_str = str(seq)
+
+        if expansion_length and len(seq_str) < expansion_length:
+            pad_len = expansion_length - len(seq_str)
+            seq_str += "N" * pad_len
+
+        sequences.append(seq_str)
+        chrom_ints.append(chrom)
+
+    df = df.copy()
+    df['sequence'] = sequences
+    df['chromosome'] = chrom_ints  
+    if save_dir:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"atac_peaks_with_sequences_{expansion_length if expansion_length else 'original'}.csv"
+        df.to_csv(save_dir / fname, index=False)
+
+    return df
+
+
+def aggregate_atac_to_pseudobulk(
+    atac_data_df, atac_metadata_df, aggfunc='mean', cell_col='Cell', 
+    pseudobulk_col='pseudobulk', peak_col='Peak', value_col='Accessibility'
+):
+    # Merge metadata to map cell to pseudobulk
+    meta = atac_metadata_df[[cell_col, pseudobulk_col]].copy()
+    merged = atac_data_df.merge(meta, left_on=cell_col, right_on=cell_col)
+    # Pivot: rows=Peak, columns=pseudobulk, values=mean accessibility
+    pseudobulk_table = (
+        merged.groupby([peak_col, pseudobulk_col])[value_col]
+        .agg(aggfunc)
+        .unstack(fill_value=0)
+    )
+    return pseudobulk_table
+
+
+def cpm_normalize_sparse(atac_data_df, cell_col='Cell', value_col='Accessibility', scale=1e6):
+    # Compute total reads per cell
+    total_reads = atac_data_df.groupby(cell_col)[value_col].transform('sum')
+    atac_data_df['CPM'] = (atac_data_df[value_col] / total_reads) * scale
+    return atac_data_df
