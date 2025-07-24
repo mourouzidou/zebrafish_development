@@ -29,3 +29,114 @@ def plot_rawVStrans(arr_raw, arr_trans, column_names, output_dir=None, name=""):
     else:
         plt.show()
 
+def plot_pseudobulk_cell_read_distributions(
+    atac_data_df, atac_metadata_df, save_path=None, max_pseudobulks=None, show=True
+):
+    cell_map = atac_metadata_df.set_index('atac_cell')[['pseudobulk', 'atac_cell_type']]
+    total_per_cell = atac_data_df.groupby('Cell')['Accessibility'].sum()
+    df_reads = (
+        total_per_cell.rename_axis('Cell').reset_index()
+        .merge(cell_map, left_on='Cell', right_index=True, how='left')
+        .dropna(subset=['pseudobulk', 'atac_cell_type'])
+    )
+    # Optionally restrict to top N pseudobulks by cell count
+    cell_counts = df_reads['pseudobulk'].value_counts()
+    order = cell_counts.index.tolist()
+    if max_pseudobulks:
+        order = order[:max_pseudobulks]
+        df_reads = df_reads[df_reads['pseudobulk'].isin(order)]
+        cell_counts = cell_counts.loc[order]
+    x_labels = [f"{pb}\n(n={cell_counts[pb]})" for pb in order]
+    plt.figure(figsize=(32, 12))
+    ax = sns.boxplot(
+        data=df_reads,
+        x='pseudobulk',
+        y='Accessibility',
+        hue='atac_cell_type',
+        order=order,
+        showfliers=False,
+        palette='tab20'
+    )
+    ax.set_xticklabels(
+        x_labels,
+        rotation=45,
+        ha='right',
+        fontsize=6,
+        linespacing=1.7
+    )
+    plt.xlabel("Pseudobulk (sorted by #cells)", fontsize=12, fontweight='bold')
+    plt.ylabel("Total Reads per Cell", fontsize=12)
+    plt.title("ATAC Reads per Cell by Pseudobulk and Cell Type", fontsize=12)
+    plt.legend(title="Cell Type", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=6)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=250)
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_pseudobulk_agg_stats(
+    atac_data_df, atac_metadata_df, save_path=None, show=True
+):
+
+    cell_map = atac_metadata_df.set_index('atac_cell')[['pseudobulk', 'atac_cell_type']]
+    total_per_cell = atac_data_df.groupby('Cell')['Accessibility'].sum()
+    df_reads = (
+        total_per_cell.rename_axis('Cell').reset_index()
+        .merge(cell_map, left_on='Cell', right_index=True, how='left')
+        .dropna(subset=['pseudobulk', 'atac_cell_type'])
+    )
+    agg = df_reads.groupby(['pseudobulk', 'atac_cell_type']).agg(
+        n_cells=('Accessibility', 'count'),
+        median=('Accessibility', 'median'),
+        std=('Accessibility', 'std'),
+        max=('Accessibility', 'max'),
+        min=('Accessibility', 'min')
+    ).reset_index()
+    agg['range'] = agg['max'] - agg['min']
+
+    def scatter_and_save(x, y, ylabel, title, fname):
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(
+            data=agg,
+            x=x, y=y,
+            hue='atac_cell_type',
+            palette='tab20',
+            s=80,
+            edgecolor='k'
+        )
+        plt.title(title, fontsize=13)
+        plt.xlabel("Number of Cells in Pseudobulk")
+        plt.ylabel(ylabel)
+        plt.legend(title="Cell Type", bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(os.path.join(save_path, fname), dpi=250)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    scatter_and_save(
+        x='n_cells',
+        y='median',
+        ylabel='Median Reads per Cell',
+        title='Median Reads per Pseudobulk vs Number of Cells',
+        fname="scatter_median_reads_vs_num_cells.png"
+    )
+    scatter_and_save(
+        x='n_cells',
+        y='std',
+        ylabel='Std (Reads per Cell)',
+        title='Std of Reads per Pseudobulk vs Number of Cells',
+        fname="scatter_std_reads_vs_num_cells.png"
+    )
+    scatter_and_save(
+        x='n_cells',
+        y='range',
+        ylabel='Max-Min Range (Reads per Cell)',
+        title='Max-Min Range per Pseudobulk vs Number of Cells',
+        fname="scatter_range_reads_vs_num_cells.png"
+    )
