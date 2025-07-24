@@ -25,3 +25,16 @@ I also attach a notebook to help have an idea and mention some of my key questio
 
 * From the distribution of the total reads of each cell inside a pseudobulk we see that:
   some pseudobulks show a wide distribution meaning either that there is some technical noise so we should account for that by discarding the highly variable pseudobulks or by quantile normalize them so that all the distributions will be forced to be identical.
+
+* Are there some celltype/ time points that are expected to be more or less involved in gene regulation (especially during embryonic development)? It seems that for the same cell type as the time passes, the overall read depth decreases. Is this something that we expect? Could this help us contextually filter or transform the data?
+
+* Another question, there are two cell types with a similar name : one is YSL and the other is YSL/presumptive endoderm. Does this make sense to you in a sense that it is important to keep it as is?
+
+* Scatterplots: I plotted the read statistics (median, std, and the range) of each pseudobulk against the size (number of cells in it) to check for any potential correlation that could imply missclassification due to inefficient sample size or any cell number related bias and it seems it is not the case. Could this indicate that the heterogeneity can be biological signal (for example that a pseudobulk can contain some subgroups)? If not, we come again to the same question, should I quantile normalize or filter to address this?
+
+* Genomic position correlation:
+
+
+
+
+In the attached notebook I have included the plots and some observations that I also sumamrize here.
