@@ -140,3 +140,61 @@ def plot_pseudobulk_agg_stats(
         title='Max-Min Range per Pseudobulk vs Number of Cells',
         fname="scatter_range_reads_vs_num_cells.png"
     )
+def plot_reads_per_cell_by_celltype_and_stage(
+    total_per_cell,
+    atac_metadata_df,
+    min_cells_per_group=10,
+    figsize=(18, 8),
+    save_path=None,
+    show=True
+):
+    df_reads = (
+        total_per_cell.rename_axis('Cell').reset_index()
+        .merge(atac_metadata_df, left_on='Cell', right_on='atac_cell', how='left')
+        .dropna(subset=['atac_cell_type', 'atac_stage'])
+    )
+    
+    # Convert stage to integer for proper sorting
+    df_reads['atac_stage_int'] = df_reads['atac_stage'].astype(int)
+    
+    # Filter to groups with enough cells
+    ct_stage_counts = df_reads.groupby(['atac_cell_type', 'atac_stage_int']).size().reset_index(name='count')
+    good = ct_stage_counts[ct_stage_counts['count'] >= min_cells_per_group]
+    df_reads = df_reads.merge(
+        good[['atac_cell_type', 'atac_stage_int']],
+        on=['atac_cell_type', 'atac_stage_int'],
+        how='inner'
+    )
+    
+    # Get sorted stages for proper ordering
+    sorted_stages = sorted(df_reads['atac_stage_int'].unique())
+    
+    # Create color palette with proper ordering
+    n_stages = len(sorted_stages)
+    colors = sns.color_palette('Spectral', n_stages)
+    stage_colors = dict(zip(sorted_stages, colors))
+    
+    plt.figure(figsize=figsize)
+    sns.boxplot(
+        data=df_reads,
+        x='atac_cell_type',
+        y='Accessibility',
+        hue='atac_stage_int',
+        hue_order=sorted_stages,  # Ensure proper ordering
+        showfliers=False,
+        palette=stage_colors  # Use ordered color mapping
+    )
+    
+    plt.xlabel('Cell Type')
+    plt.ylabel('Total Reads per Cell')
+    plt.title('Reads per Cell by Cell Type and Stage')
+    plt.legend(title='Stage', bbox_to_anchor=(1.01, 1), loc='upper left')
+    plt.xticks(rotation=25, ha='right')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=200)
+    if show:
+        plt.show()
+    else:
+        plt.close()
