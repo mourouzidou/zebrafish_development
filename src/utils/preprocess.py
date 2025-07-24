@@ -175,7 +175,6 @@ def aggregate_atac_to_pseudobulk(
     peak_col='Peak', 
     aggfunc='mean'
 ):
-    # Since atac_data_df already has pseudobulk column, no need to merge
     pseudobulk_matrix = (
         atac_data_df.groupby([peak_col, pseudobulk_col])[value_col]
         .agg(aggfunc)
