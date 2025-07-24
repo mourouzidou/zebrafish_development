@@ -5,6 +5,7 @@ import seaborn as sns
 from sklearn.preprocessing import quantile_transform
 from Bio import SeqIO
 from pathlib import Path
+import seaborn as sns
 
 def one_hot_encode(sequence):
     seq_array = np.array(list(sequence))[:, None]
@@ -160,24 +161,25 @@ def extract_centered_sequences(df, fasta_dir, expansion_length=None, save_dir=".
     return df
 
 
+def cpm_normalize_sparse(df, value_col='Accessibility', cell_col='Cell', scale=1e6):
+    total_per_cell = df.groupby(cell_col)[value_col].transform('sum')
+    df = df.copy()
+    df['CPM'] = df[value_col] / total_per_cell * scale
+    return df
+
+
 def aggregate_atac_to_pseudobulk(
-    atac_data_df, atac_metadata_df, aggfunc='mean', cell_col='Cell', 
-    pseudobulk_col='pseudobulk', peak_col='Peak', value_col='Accessibility'
+    atac_data_df, 
+    value_col='CPM', 
+    pseudobulk_col='pseudobulk',
+    peak_col='Peak', 
+    aggfunc='mean'
 ):
-    # Merge metadata to map cell to pseudobulk
-    meta = atac_metadata_df[[cell_col, pseudobulk_col]].copy()
-    merged = atac_data_df.merge(meta, left_on=cell_col, right_on=cell_col)
-    # Pivot: rows=Peak, columns=pseudobulk, values=mean accessibility
-    pseudobulk_table = (
-        merged.groupby([peak_col, pseudobulk_col])[value_col]
+    # Since atac_data_df already has pseudobulk column, no need to merge
+    pseudobulk_matrix = (
+        atac_data_df.groupby([peak_col, pseudobulk_col])[value_col]
         .agg(aggfunc)
         .unstack(fill_value=0)
     )
-    return pseudobulk_table
-
-
-def cpm_normalize_sparse(atac_data_df, cell_col='Cell', value_col='Accessibility', scale=1e6):
-    # Compute total reads per cell
-    total_reads = atac_data_df.groupby(cell_col)[value_col].transform('sum')
-    atac_data_df['CPM'] = (atac_data_df[value_col] / total_reads) * scale
-    return atac_data_df
+    pseudobulk_matrix.index.name = 'Peak'
+    return pseudobulk_matrix
