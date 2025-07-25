@@ -229,6 +229,16 @@ def extract_gene_info_from_gtf(gtf_path):
 
     return pd.DataFrame(records)
 
+
+def fix_chromosome_types(peaks_df, tss_df):
+    peaks_fixed = peaks_df.copy()
+    tss_fixed = tss_df.copy()
+    
+    peaks_fixed['chromosome'] = peaks_fixed['chromosome'].astype(str)
+    tss_fixed['chrom'] = tss_fixed['chrom'].astype(str)
+    
+    return peaks_fixed, tss_fixed
+
 def annotate_peaks_with_region_types(peaks_df, gene_df, distance_threshold=1000):
     peaks_df, gene_df = fix_chromosome_types(peaks_df, gene_df)
 
