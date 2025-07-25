@@ -6,6 +6,8 @@ from sklearn.preprocessing import quantile_transform
 from Bio import SeqIO
 from pathlib import Path
 import seaborn as sns
+from scipy.spatial import cKDTree
+
 
 def one_hot_encode(sequence):
     seq_array = np.array(list(sequence))[:, None]
@@ -112,22 +114,24 @@ def plot_distributions(
     _plot(df_quant, "Quantile Normalized", use_single_color=True, fname=fname_quant)
 
 
+from Bio import SeqIO
+from pathlib import Path
 
-
-def extract_centered_sequences(df, fasta_dir, expansion_length=None, save_dir="../../data/embryo/processed"):
+def extract_centered_sequences(
+    df, fasta_dir, expansion_length=None, save_dir="../../data/embryo/processed", df_name="atac"
+):
     chr_seqs = {}
     sequences = []
     chrom_ints = []
 
     for idx, row in df.iterrows():
-        chrom_raw = str(row['chromosome'])  # convert to string first
+        chrom_raw = str(row['chromosome'])
         chrom_str = chrom_raw.replace("chr", "")
         chrom = int(chrom_str) if chrom_str.isdigit() else chrom_str
 
-        chrom = int(chrom_str) if chrom_str.isdigit() else chrom_str  # handles "MT" or "X"
         start, end = int(row['start']), int(row['end'])
 
-        fasta_chrom_key = str(chrom)  # filenames still use string format
+        fasta_chrom_key = str(chrom)
         if fasta_chrom_key not in chr_seqs:
             fasta_path = Path(fasta_dir) / f"Danio_rerio.GRCz11.dna.chromosome.{fasta_chrom_key}.fa"
             record = next(SeqIO.parse(fasta_path, "fasta"))
@@ -152,13 +156,15 @@ def extract_centered_sequences(df, fasta_dir, expansion_length=None, save_dir=".
     df = df.copy()
     df['sequence'] = sequences
     df['chromosome'] = chrom_ints  
+
     if save_dir:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        fname = f"atac_peaks_with_sequences_{expansion_length if expansion_length else 'original'}.csv"
+        fname = f"{df_name}_with_sequences_{expansion_length if expansion_length else 'original'}.csv"
         df.to_csv(save_dir / fname, index=False)
 
     return df
+
 
 
 def cpm_normalize_sparse(df, value_col='Accessibility', cell_col='Cell', scale=1e6):
@@ -182,3 +188,87 @@ def aggregate_atac_to_pseudobulk(
     )
     pseudobulk_matrix.index.name = 'Peak'
     return pseudobulk_matrix
+
+def extract_gene_info_from_gtf(gtf_path):
+    records = []
+
+    with open(gtf_path, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            fields = line.strip().split('\t')
+            if len(fields) < 9 or fields[2] != 'gene':
+                continue
+
+            chrom = fields[0]
+            start = int(fields[3])
+            end = int(fields[4])
+            strand = fields[6]
+            attributes = fields[8]
+
+            attrs = {
+                k: v.strip('"') for k, v in 
+                [item.strip().split(' ')[:2] for item in attributes.strip(';').split(';') if item]
+            }
+
+            gene_id = attrs.get("gene_id")
+            gene_name = attrs.get("gene_name")
+            if not gene_id or not gene_name:
+                continue
+
+            tss = start if strand == '+' else end
+
+            records.append({
+                'chrom': chrom,
+                'start': start,
+                'end': end,
+                'tss_position': tss,
+                'gene_name': gene_name,
+                'gene_id': gene_id
+            })
+
+    return pd.DataFrame(records)
+
+def annotate_peaks_with_region_types(peaks_df, gene_df, distance_threshold=1000):
+    peaks_df, gene_df = fix_chromosome_types(peaks_df, gene_df)
+
+    promoter_enhancer_labels = []
+    intra_intergenic_labels = []
+
+    for chrom in peaks_df['chromosome'].unique():
+        peaks_chr = peaks_df[peaks_df['chromosome'] == chrom]
+        genes_chr = gene_df[gene_df['chrom'] == chrom]
+
+        if genes_chr.empty:
+            promoter_enhancer_labels.extend(['enhancer'] * len(peaks_chr))
+            intra_intergenic_labels.extend(['intergenic'] * len(peaks_chr))
+            continue
+
+        peak_centers = ((peaks_chr['start'] + peaks_chr['end']) // 2).values.reshape(-1, 1)
+        tss_positions = genes_chr['tss_position'].values.reshape(-1, 1)
+
+        # Annotate promoter/enhancer
+        tree = cKDTree(tss_positions)
+        distances, _ = tree.query(peak_centers, k=1)
+        promoter_enhancer = np.where(distances <= distance_threshold, 'promoter', 'enhancer')
+        promoter_enhancer_labels.extend(promoter_enhancer.tolist())
+
+        # Annotate intragenic/intergenic (overlap)
+        intragenic = []
+        for _, peak in peaks_chr.iterrows():
+            peak_start, peak_end = peak['start'], peak['end']
+            overlapping = genes_chr[
+                (genes_chr['start'] <= peak_end) & (genes_chr['end'] >= peak_start)
+            ]
+            if not overlapping.empty:
+                intragenic.append('intragenic')
+            else:
+                intragenic.append('intergenic')
+        intra_intergenic_labels.extend(intragenic)
+
+    annotated = peaks_df.copy()
+    annotated['region_type'] = promoter_enhancer_labels
+    annotated['genomic_context'] = intra_intergenic_labels
+
+    return annotated
+
