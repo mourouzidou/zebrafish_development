@@ -265,3 +265,59 @@ def plot_distributions(
     
     _plot(df_raw, "Raw", use_single_color=False, fname=fname_raw)
     _plot(df_quant, "Quantile Normalized", use_single_color=True, fname=fname_quant)
+
+
+
+
+def plot_grouped_boxplot(
+    long_df,
+    value_for_plot,
+    region_col='region_type',
+    groupby='pseudobulk',
+    figsize=(20,7),
+    show=True,
+    save_path=None,
+    distance_cutoff=None,
+    min_cells=1,
+    region_palette=None,
+):
+    """Plots boxplot of (total/mean) accessibility per cell, grouped by groupby (celltype or pseudobulk)."""
+    # Prepare label, sort groups by size
+    group_counts = long_df.groupby(groupby)['Cell'].nunique().sort_values(ascending=False)
+    ordered_groups = group_counts.index.tolist()
+    x_labels = [f"{grp}\n(n={group_counts[grp]})" for grp in ordered_groups]
+    label_map = dict(zip(ordered_groups, x_labels))
+
+    if region_palette is None:
+        palette = dict(zip(long_df[region_col].unique(), sns.color_palette("tab20", n_colors=long_df[region_col].nunique())))
+    else:
+        palette = region_palette
+
+    plt.figure(figsize=figsize)
+    ax = sns.boxplot(
+        data=long_df[long_df[groupby].isin(ordered_groups)],
+        x=groupby,
+        y=value_for_plot,
+        hue=region_col,
+        showfliers=False,
+        order=ordered_groups,
+        palette=palette
+    )
+    ax.set_xticklabels([label_map[tick.get_text()] for tick in ax.get_xticklabels()],
+                       rotation=45, ha='right')
+    cutoff_str = f" | Distance cutoff: {distance_cutoff} bp" if distance_cutoff is not None else ""
+    y_lab = ("Mean" if 'mean' in value_for_plot else "Total") + " Accessibility per Cell"
+    ax.set_title(
+        f'{y_lab} by {groupby.replace("_", " ").title()} ({region_col}){cutoff_str}',
+        fontsize=15
+    )
+    ax.set_xlabel(groupby.replace('_', ' ').title())
+    ax.set_ylabel(y_lab)
+    plt.legend(title=region_col.replace("_", " ").title())
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close()

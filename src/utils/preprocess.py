@@ -282,3 +282,49 @@ def annotate_peaks_with_region_types(peaks_df, gene_df, distance_threshold=1000)
 
     return annotated
 
+
+def get_cell_metadata(atac_metadata_df):
+    cell_meta = atac_metadata_df.rename(columns={'atac_cell': 'Cell'})[['Cell', 'atac_cell_type', 'pseudobulk']]
+    return cell_meta
+
+def summarize_accessibility(
+    atac_data_df,
+    atac_metadata_df,
+    region_col='region_type',   # Or 'genomic_context'
+    value_col='Accessibility',
+    groupby='pseudobulk',       # Or 'atac_cell_type'
+    normalize_by_num_peaks=False,
+    min_cells=1,
+    region_include=None,        # List of region types to include
+    region_exclude=None         # List of region types to exclude
+):
+    if region_include is not None:
+        atac_data_df = atac_data_df[atac_data_df[region_col].isin(region_include)]
+    if region_exclude is not None:
+        atac_data_df = atac_data_df[~atac_data_df[region_col].isin(region_exclude)]
+
+    df_sum = (
+        atac_data_df
+        .groupby(['Cell', region_col])[value_col]
+        .sum()
+        .reset_index()
+        .rename(columns={value_col: 'total_accessibility'})
+    )
+
+    if normalize_by_num_peaks:
+        region_sizes = atac_data_df.groupby(region_col)['Peak'].nunique().to_dict()
+        df_sum['mean_accessibility'] = df_sum.apply(
+            lambda r: r['total_accessibility'] / region_sizes.get(r[region_col], 1), axis=1
+        )
+        value_for_plot = 'mean_accessibility'
+    else:
+        value_for_plot = 'total_accessibility'
+
+    cell_meta = get_cell_metadata(atac_metadata_df)
+    df_sum = df_sum.merge(cell_meta, on='Cell', how='left')
+
+    group_counts = df_sum[groupby].value_counts()
+    valid_groups = group_counts[group_counts >= min_cells].index.tolist()
+    df_sum = df_sum[df_sum[groupby].isin(valid_groups)]
+
+    return df_sum, value_for_plot
