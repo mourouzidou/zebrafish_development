@@ -239,7 +239,12 @@ def fix_chromosome_types(peaks_df, tss_df):
     
     return peaks_fixed, tss_fixed
 
-def annotate_peaks_with_region_types(peaks_df, gene_df, distance_threshold=1000):
+from scipy.spatial import cKDTree
+
+def annotate_peaks_with_genomic_info(
+    peaks_df, gene_df, distance_threshold=1000,
+    meta_cols=['Peak', 'chromosome', 'start', 'end', 'sequence', 'region_type', 'genomic_context']
+):
     peaks_df, gene_df = fix_chromosome_types(peaks_df, gene_df)
 
     promoter_enhancer_labels = []
@@ -280,8 +285,91 @@ def annotate_peaks_with_region_types(peaks_df, gene_df, distance_threshold=1000)
     annotated['region_type'] = promoter_enhancer_labels
     annotated['genomic_context'] = intra_intergenic_labels
 
-    return annotated
+    remaining_cols = [col for col in annotated.columns if col not in meta_cols]
+    new_order = meta_cols + remaining_cols
+    annotated = annotated[new_order]
 
+    return annotated
+def compute_total_accessibility_by_region(
+    atac_data_df, peak_region_df, region_col='region_type', value_col='Accessibility', cell_col='Cell', peak_col='Peak'
+):
+    
+    # Map region type to atac_data_df
+    peak_region = peak_region_df.set_index(peak_col)[region_col].to_dict()
+    atac_data_df = atac_data_df.copy()
+    atac_data_df[region_col] = atac_data_df[peak_col].map(peak_region)
+
+    # Promoter counts
+    promoter_counts = (
+        atac_data_df[atac_data_df[region_col] == 'promoter']
+        .groupby(cell_col)[value_col].sum()
+        .rename('total_promoter_accessibility')
+        .reset_index()
+    )
+    # Enhancer counts
+    enhancer_counts = (
+        atac_data_df[atac_data_df[region_col] == 'enhancer']
+        .groupby(cell_col)[value_col].sum()
+        .rename('total_enhancer_accessibility')
+        .reset_index()
+    )
+
+    return promoter_counts, enhancer_counts
+
+
+def summarize_peak_accessibility(
+    atac_data_df, ann_df, atac_metadata_df
+):
+    # Map each peak to its region_type and genomic_context
+    peak_region = ann_df.set_index('Peak')['region_type'].to_dict()
+    peak_context = ann_df.set_index('Peak')['genomic_context'].to_dict()
+    atac_data_df = atac_data_df.copy()
+    atac_data_df['region_type'] = atac_data_df['Peak'].map(peak_region)
+    atac_data_df['genomic_context'] = atac_data_df['Peak'].map(peak_context)
+    
+    # Pivot: Region type (promoter/enhancer)
+    region_summary = (
+        atac_data_df.pivot_table(
+            index='Cell',
+            columns='region_type',
+            values='Accessibility',
+            aggfunc='sum',
+            fill_value=0
+        )
+        .rename_axis(None, axis=1)
+        .add_prefix('total_')
+        .add_suffix('_accessibility')
+        .reset_index()
+    )
+    
+    # Pivot: Genomic context (intragenic/intergenic)
+    context_summary = (
+        atac_data_df.pivot_table(
+            index='Cell',
+            columns='genomic_context',
+            values='Accessibility',
+            aggfunc='sum',
+            fill_value=0
+        )
+        .rename_axis(None, axis=1)
+        .add_prefix('total_')
+        .add_suffix('_accessibility')
+        .reset_index()
+    )
+    
+    # Merge both summaries
+    summary = region_summary.merge(context_summary, on='Cell', how='outer')
+    
+    # Add metadata (cell type and pseudobulk)
+    cell_meta_cols = ['Cell', 'atac_cell_type', 'pseudobulk']
+    cell_meta = atac_metadata_df.rename(columns={'atac_cell': 'Cell'})[cell_meta_cols]
+    summary = summary.merge(cell_meta, on='Cell', how='left')
+    
+    return summary
+
+# Example usage:
+summary_df = summarize_peak_accessibility(atac_data_df, ann_100, atac_metadata_df)
+print(summary_df.head())
 
 def get_cell_metadata(atac_metadata_df):
     cell_meta = atac_metadata_df.rename(columns={'atac_cell': 'Cell'})[['Cell', 'atac_cell_type', 'pseudobulk']]

@@ -320,4 +320,64 @@ def plot_grouped_boxplot(
     if show:
         plt.show()
     else:
-        plt.close()
+        plt.close()def plot_summary_accessibility(
+    summary_df, 
+    gen_info="region_type",         # "region_type" or "genomic_context"
+    group_by="atac_cell_type",      # "atac_cell_type" or "pseudobulk"
+    dist=1000,                     # distance cutoff for region_type/promoter annotation
+    show=True, 
+    save_path=None
+):
+    """
+    Plots mean accessibility per cell by region/genomic context and group (cell type or pseudobulk).
+    """
+    # Column selection and labels
+    if gen_info == "region_type":
+        col1, col2 = "total_enhancer_accessibility", "total_promoter_accessibility"
+        plot_labels = ["enhancer", "promoter"]
+        legend_title = "Region Type"
+    elif gen_info == "genomic_context":
+        col1, col2 = "total_intergenic_accessibility", "total_intragenic_accessibility"
+        plot_labels = ["intergenic", "intragenic"]
+        legend_title = "Genomic Context"
+    else:
+        raise ValueError("gen_info must be 'region_type' or 'genomic_context'")
+
+    # Prepare dataframe in long format for seaborn
+    plot_df = summary_df[[group_by, col1, col2]].copy()
+    plot_df = plot_df.melt(id_vars=group_by, value_vars=[col1, col2], 
+                           var_name='Context', value_name='Accessibility')
+    plot_df['Context'] = plot_df['Context'].map({
+        col1: plot_labels[0],
+        col2: plot_labels[1]
+    })
+
+    # Order groups by number of cells
+    group_counts = summary_df[group_by].value_counts()
+    order = group_counts.index.tolist()
+    x_labels = [f"{grp}\n(n={group_counts[grp]})" for grp in order]
+
+    # Plot
+    plt.figure(figsize=(22, 8))
+    ax = sns.boxplot(
+        data=plot_df,
+        x=group_by,
+        y='Accessibility',
+        hue='Context',
+        order=order,
+        palette='pastel'
+    )
+    plt.title(
+        f"Mean Accessibility per Cell by {group_by.replace('_', ' ').title()} "
+        f"({legend_title}) | Distance cutoff: {dist} bp"
+    )
+    plt.xlabel(group_by.replace('_', ' ').title())
+    plt.ylabel("Total Accessibility per Cell")
+    ax.set_xticklabels(x_labels, rotation=25, ha='right', fontsize=9)
+    plt.legend(title=legend_title, bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=10)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=180)
+    if show:
+        plt.show()
+    plt.close()
