@@ -6,6 +6,7 @@ from sklearn.preprocessing import quantile_transform
 from Bio import SeqIO
 from pathlib import Path
 import seaborn as sns
+import re
 from scipy.spatial import cKDTree
 
 
@@ -17,11 +18,141 @@ def one_hot_encode(sequence):
     one_hot[n_mask] = 0.25
     return one_hot
 
+##__________________ATAC data preprocessing____________________
+
 def quantile_normalize(x, axis=0):
     sorted_x = np.sort(x, axis=axis)
     meanx = np.mean(sorted_x, axis=axis-1)
     xqtrl = meanx[np.argsort(np.argsort(x, axis=axis), axis=axis)]
     return xqtrl
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+
+def extract_stage_number(stage_str):
+    match = re.search(r'(\d+)', str(stage_str))
+    return int(match.group(1)) if match else 0
+
+def process_trajectory_data(df, cell_type_col, stage_col):
+    stage_celltype_counts = df.groupby([cell_type_col, stage_col]).size().reset_index(name='count')
+    stage_celltype_counts['stage_numeric'] = stage_celltype_counts[stage_col].apply(extract_stage_number)
+    heatmap_data = stage_celltype_counts.pivot(index=cell_type_col, columns='stage_numeric', values='count')
+    heatmap_data = heatmap_data.fillna(0)
+    heatmap_data = heatmap_data.reindex(sorted(heatmap_data.columns), axis=1)
+    return heatmap_data
+
+def get_earliest_stage_unified(cell_type, atac_data, rna_data):
+    earliest = float('inf')
+    if atac_data is not None and cell_type in atac_data.index:
+        for stage in sorted(atac_data.columns):
+            if atac_data.loc[cell_type, stage] > 0:
+                earliest = min(earliest, int(stage))
+                break
+    if rna_data is not None and cell_type in rna_data.index:
+        for stage in sorted(rna_data.columns):
+            if rna_data.loc[cell_type, stage] > 0:
+                earliest = min(earliest, int(stage))
+                break
+    return earliest if earliest != float('inf') else 999
+
+def plot_trajectories(ax, cell_types, atac_data, rna_data, all_stages, title, plot_type):
+    if len(cell_types) == 0:
+        ax.text(0.5, 0.5, 'No cell types in this category', 
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+        ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
+        return
+    
+    if plot_type == 'shared':
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, atac_data, rna_data))
+    elif plot_type == 'atac_only':
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, atac_data, None))
+    else:
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, None, rna_data))
+    
+    colors = plt.cm.tab20(np.linspace(0, 1, len(cell_types_sorted)))
+    color_map = {cell_type: colors[i] for i, cell_type in enumerate(cell_types_sorted)}
+    
+    y_offset = 0
+    max_counts = []
+    if atac_data is not None:
+        max_counts.append(atac_data.values.max())
+    if rna_data is not None:
+        max_counts.append(rna_data.values.max())
+    max_count = max(max_counts) if max_counts else 1000
+    
+    y_spacing = max(500, max_count * 0.12)
+    cell_type_positions = {}
+    
+    for cell_type in cell_types_sorted:
+        cell_color = color_map[cell_type]
+        max_y_for_cell = 0
+    
+        if atac_data is not None and cell_type in atac_data.index:
+            atac_y_values = []
+            for stage in all_stages:
+                if stage in atac_data.columns:
+                    atac_y_values.append(atac_data.loc[cell_type, stage])
+                else:
+                    atac_y_values.append(0)
+            
+            atac_y_values_offset = [val + y_offset for val in atac_y_values]
+            max_y_for_cell = max(max_y_for_cell, max(atac_y_values))
+            
+            ax.plot(all_stages, atac_y_values_offset, marker='o', linewidth=2.5, 
+                   markersize=5, color=cell_color, alpha=0.8, linestyle='-',
+                   label=f'{cell_type} (ATAC)' if plot_type == 'shared' else cell_type)
+            
+            non_zero_stages = [stage for stage, count in zip(all_stages, atac_y_values) if count > 0]
+            non_zero_counts = [count + y_offset for count in atac_y_values if count > 0]
+            if non_zero_stages:
+                ax.scatter(non_zero_stages, non_zero_counts, color=cell_color, 
+                          s=50, zorder=5, alpha=0.9, marker='o', edgecolor='white', linewidth=1)
+        
+        if rna_data is not None and cell_type in rna_data.index:
+            rna_y_values = []
+            for stage in all_stages:
+                if stage in rna_data.columns:
+                    rna_y_values.append(rna_data.loc[cell_type, stage])
+                else:
+                    rna_y_values.append(0)
+            
+            rna_y_values_offset = [val + y_offset for val in rna_y_values]
+            max_y_for_cell = max(max_y_for_cell, max(rna_y_values))
+            
+            ax.plot(all_stages, rna_y_values_offset, marker='s', linewidth=2.5, 
+                   markersize=5, color=cell_color, alpha=0.8, linestyle='--',
+                   label=f'{cell_type} (RNA)' if plot_type == 'shared' else cell_type)
+            
+            non_zero_stages = [stage for stage, count in zip(all_stages, rna_y_values) if count > 0]
+            non_zero_counts = [count + y_offset for count in rna_y_values if count > 0]
+            if non_zero_stages:
+                ax.scatter(non_zero_stages, non_zero_counts, color=cell_color, 
+                          s=50, zorder=5, alpha=0.9, marker='s', edgecolor='white', linewidth=1)
+        
+        cell_type_positions[cell_type] = y_offset
+        y_offset += max_y_for_cell + y_spacing
+    
+    for cell_type, y_pos in cell_type_positions.items():
+        ax.text(max(all_stages) + 0.3, y_pos + y_spacing*0.1, cell_type, 
+                va='bottom', ha='left', fontsize=9, fontweight='bold',
+                color=color_map[cell_type])
+    
+    ax.set_xlabel('Developmental Stage (hpf)', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Cell Count', fontsize=11, fontweight='bold')
+    ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
+    ax.set_xticks(all_stages)
+    ax.set_xticklabels([f'{stage}hpf' for stage in all_stages], rotation=45, ha='right')
+    ax.set_xlim(min(all_stages)-0.5, max(all_stages)+1.5)
+    ax.set_yticks([])
+    ax.grid(True, alpha=0.3, axis='x')
+    for i, y_pos in enumerate(cell_type_positions.values()):
+        if i > 0:
+            ax.axhline(y=y_pos - y_spacing/2, color='gray', linestyle=':', alpha=0.3)
 
 def get_feature_cols(df, drop_n_last_cols=5):
     return df.columns[:-drop_n_last_cols]
@@ -348,7 +479,7 @@ def summarize_peak_accessibility(
             index='Cell',
             columns='genomic_context',
             values='Accessibility',
-            aggfunc='sum',
+            aggfunc='mean',
             fill_value=0
         )
         .rename_axis(None, axis=1)
@@ -380,8 +511,8 @@ def summarize_accessibility(
     groupby='pseudobulk',       # Or 'atac_cell_type'
     normalize_by_num_peaks=True,
     min_cells=1,
-    region_include=None,        # List of region types to include
-    region_exclude=None         # List of region types to exclude
+    region_include=None,        
+    region_exclude=None        
 ):
     if region_include is not None:
         atac_data_df = atac_data_df[atac_data_df[region_col].isin(region_include)]
@@ -413,3 +544,280 @@ def summarize_accessibility(
     df_sum = df_sum[df_sum[groupby].isin(valid_groups)]
 
     return df_sum, value_for_plot
+
+def create_pseudobulk_stats(
+    atac_df, 
+    atac_metadata_df, 
+    value_column="Accessibility",
+    norm_reads=False,
+    norm_target_reads=1e6,
+    min_cells=None,
+):
+    atac_df = atac_df.copy()
+    celltype_lookup = dict(zip(atac_metadata_df['atac_cell'], atac_metadata_df['atac_cell_type']))
+    # Extract stage, celltype, and pseudobulk columns
+    atac_df['stage'] = atac_df['Cell'].str.extract(r'(\d{1,2})[a-zA-Z]', expand=False)
+    atac_df['celltype'] = atac_df['Cell'].map(celltype_lookup)
+    atac_df['stage_celltype'] = atac_df['stage'] + '_' + atac_df['celltype']
+
+    if norm_reads:
+        # Normalize values within each cell
+        cell_sum = atac_df.groupby('Cell')[value_column].transform('sum')
+        # Avoid division by zero
+        cell_sum = cell_sum.replace(0, np.nan)
+        atac_df[value_column + "_norm"] = (atac_df[value_column] / cell_sum) * norm_target_reads
+        value_column_use = value_column + "_norm"
+    else:
+        value_column_use = value_column
+
+    if min_cells is not None:
+        pseudobulk_counts = atac_df.groupby('stage_celltype')['Cell'].nunique()
+        valid_pseudobulks = pseudobulk_counts.index[pseudobulk_counts >= min_cells]
+        atac_df = atac_df[atac_df['stage_celltype'].isin(valid_pseudobulks)]
+
+    grouped = atac_df.groupby(['Peak', 'stage_celltype'])[value_column_use]
+    mean_df = grouped.mean().unstack(fill_value=0)
+    std_df = grouped.std().unstack(fill_value=0).fillna(0)
+    return mean_df, std_df
+
+
+##_______________RNA data preprocessing____________________
+
+def extract_stage(cell_id, delimiter='h', pos=0):
+    return str(cell_id).split(delimiter)[pos].replace('h', '')
+
+
+
+def extract_stage_number(stage_str):
+    match = re.search(r'(\d+)', str(stage_str))
+    return int(match.group(1)) if match else 0
+
+def process_trajectory_data(df, cell_type_col, stage_col):
+    stage_celltype_counts = df.groupby([cell_type_col, stage_col]).size().reset_index(name='count')
+    stage_celltype_counts['stage_numeric'] = stage_celltype_counts[stage_col].apply(extract_stage_number)
+    heatmap_data = stage_celltype_counts.pivot(index=cell_type_col, columns='stage_numeric', values='count')
+    heatmap_data = heatmap_data.fillna(0)
+    heatmap_data = heatmap_data.reindex(sorted(heatmap_data.columns), axis=1)
+    return heatmap_data
+
+def get_earliest_stage_unified(cell_type, atac_data, rna_data):
+    earliest = float('inf')
+    if atac_data is not None and cell_type in atac_data.index:
+        for stage in sorted(atac_data.columns):
+            if atac_data.loc[cell_type, stage] > 0:
+                earliest = min(earliest, int(stage))
+                break
+    if rna_data is not None and cell_type in rna_data.index:
+        for stage in sorted(rna_data.columns):
+            if rna_data.loc[cell_type, stage] > 0:
+                earliest = min(earliest, int(stage))
+                break
+    return earliest if earliest != float('inf') else 999
+
+def plot_trajectories(ax, cell_types, atac_data, rna_data, all_stages, title, plot_type):
+    if len(cell_types) == 0:
+        ax.text(0.5, 0.5, 'No cell types in this category', 
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+        ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
+        return
+    
+    if plot_type == 'shared':
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, atac_data, rna_data))
+    elif plot_type == 'atac_only':
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, atac_data, None))
+    else:
+        cell_types_sorted = sorted(cell_types, 
+                                  key=lambda x: get_earliest_stage_unified(x, None, rna_data))
+    
+    colors = plt.cm.tab20(np.linspace(0, 1, len(cell_types_sorted)))
+    color_map = {cell_type: colors[i] for i, cell_type in enumerate(cell_types_sorted)}
+    
+    y_offset = 0
+    max_counts = []
+    if atac_data is not None:
+        max_counts.append(atac_data.values.max())
+    if rna_data is not None:
+        max_counts.append(rna_data.values.max())
+    max_count = max(max_counts) if max_counts else 1000
+    
+    y_spacing = max(500, max_count * 0.12)
+    cell_type_positions = {}
+    
+    for cell_type in cell_types_sorted:
+        cell_color = color_map[cell_type]
+        max_y_for_cell = 0
+    
+        if atac_data is not None and cell_type in atac_data.index:
+            atac_y_values = []
+            for stage in all_stages:
+                if stage in atac_data.columns:
+                    atac_y_values.append(atac_data.loc[cell_type, stage])
+                else:
+                    atac_y_values.append(0)
+            
+            atac_y_values_offset = [val + y_offset for val in atac_y_values]
+            max_y_for_cell = max(max_y_for_cell, max(atac_y_values))
+            
+            ax.plot(all_stages, atac_y_values_offset, marker='o', linewidth=2.5, 
+                   markersize=5, color=cell_color, alpha=0.8, linestyle='-',
+                   label=f'{cell_type} (ATAC)' if plot_type == 'shared' else cell_type)
+            
+            non_zero_stages = [stage for stage, count in zip(all_stages, atac_y_values) if count > 0]
+            non_zero_counts = [count + y_offset for count in atac_y_values if count > 0]
+            if non_zero_stages:
+                ax.scatter(non_zero_stages, non_zero_counts, color=cell_color, 
+                          s=50, zorder=5, alpha=0.9, marker='o', edgecolor='white', linewidth=1)
+        
+        if rna_data is not None and cell_type in rna_data.index:
+            rna_y_values = []
+            for stage in all_stages:
+                if stage in rna_data.columns:
+                    rna_y_values.append(rna_data.loc[cell_type, stage])
+                else:
+                    rna_y_values.append(0)
+            
+            rna_y_values_offset = [val + y_offset for val in rna_y_values]
+            max_y_for_cell = max(max_y_for_cell, max(rna_y_values))
+            
+            ax.plot(all_stages, rna_y_values_offset, marker='s', linewidth=2.5, 
+                   markersize=5, color=cell_color, alpha=0.8, linestyle='--',
+                   label=f'{cell_type} (RNA)' if plot_type == 'shared' else cell_type)
+            
+            non_zero_stages = [stage for stage, count in zip(all_stages, rna_y_values) if count > 0]
+            non_zero_counts = [count + y_offset for count in rna_y_values if count > 0]
+            if non_zero_stages:
+                ax.scatter(non_zero_stages, non_zero_counts, color=cell_color, 
+                          s=50, zorder=5, alpha=0.9, marker='s', edgecolor='white', linewidth=1)
+        
+        cell_type_positions[cell_type] = y_offset
+        y_offset += max_y_for_cell + y_spacing
+    
+    for cell_type, y_pos in cell_type_positions.items():
+        ax.text(max(all_stages) + 0.3, y_pos + y_spacing*0.1, cell_type, 
+                va='bottom', ha='left', fontsize=9, fontweight='bold',
+                color=color_map[cell_type])
+    
+    ax.set_xlabel('Developmental Stage (hpf)', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Cell Count', fontsize=11, fontweight='bold')
+    ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
+    ax.set_xticks(all_stages)
+    ax.set_xticklabels([f'{stage}hpf' for stage in all_stages], rotation=45, ha='right')
+    ax.set_xlim(min(all_stages)-0.5, max(all_stages)+1.5)
+    ax.set_yticks([])
+    ax.grid(True, alpha=0.3, axis='x')
+    for i, y_pos in enumerate(cell_type_positions.values()):
+        if i > 0:
+            ax.axhline(y=y_pos - y_spacing/2, color='gray', linestyle=':', alpha=0.3)
+
+def compute_pseudobulk_cutoffs_df(rna_data_matched, atac_metadata, marker_genes_dict=None, cutoff_mode='celltype'):
+    metadata = atac_metadata.set_index('rna_matching_cell').loc[rna_data_matched.columns].reset_index(names='rna_matching_cell')
+    pseudobulk_names = metadata['pseudobulk'].unique()
+    results = []
+    
+    for pb in pseudobulk_names:
+        celltype = metadata[metadata['pseudobulk'] == pb]['atac_cell_type'].iloc[0]
+        cells_in_pb = metadata[metadata['pseudobulk'] == pb]['rna_matching_cell']
+        same_type_cells = metadata[metadata['atac_cell_type'] == celltype]['rna_matching_cell']
+        same_type_pseudobulks = metadata[metadata['atac_cell_type'] == celltype]['pseudobulk'].unique()
+
+        if len(same_type_cells) == 0:
+            continue
+
+        if marker_genes_dict is not None:
+            marker_genes = marker_genes_dict.get(pb, [])
+            marker_genes = [g for g in marker_genes if g in rna_data_matched.index]
+            genes_to_use = marker_genes
+        else:
+            genes_to_use = rna_data_matched.index
+        
+        mean_expression = rna_data_matched.loc[genes_to_use, cells_in_pb].mean(axis=1)
+        mean_vec_reshaped = mean_expression.values.reshape(1, -1)
+
+        if cutoff_mode == 'pseudobulk':
+            # Compute distances from cells of the same type to the pseudobulk mean expression vector
+            same_type_matrix = rna_data_matched.loc[genes_to_use, same_type_cells].T.values
+            distances = cdist(same_type_matrix, mean_vec_reshaped, metric='euclidean').flatten()
+            cutoff = distances.max()
+        elif cutoff_mode == 'celltype':
+            # Compute the mean expression vector of all pseudobulks with the same cell type
+            mean_same_type_expression = rna_data_matched.loc[genes_to_use, metadata[metadata['pseudobulk'].isin(same_type_pseudobulks)]['rna_matching_cell']].mean(axis=1)
+            mean_same_type_vec_reshaped = mean_same_type_expression.values.reshape(1, -1)
+            # Compute distances from all same cell type cells to this mean vector
+            same_type_matrix = rna_data_matched.loc[genes_to_use, same_type_cells].T.values
+            distances = cdist(same_type_matrix, mean_same_type_vec_reshaped, metric='euclidean').flatten()
+            cutoff = distances.max()
+        else:
+            raise ValueError("Invalid cutoff_mode. Use 'max_distance' or 'mean_distance'.")
+        
+        results.append({
+            'pseudobulk': pb,
+            'atac_cell_type': celltype,
+            'cutoff': cutoff,
+            'n_cells_in_pseudobulk': len(cells_in_pb),
+            'n_cells_same_type': len(same_type_cells)
+        })
+    
+    return pd.DataFrame(results)
+
+def create_rna_mean(rna_data, atac_metadata_df, valid_pseudobulks):
+    cell_to_pseudobulk = atac_metadata_df.set_index('rna_matching_cell')['pseudobulk'].to_dict()
+    rna_data_psd = rna_data.rename(columns=cell_to_pseudobulk)
+    rna_data_filtered = rna_data_psd.loc[:, rna_data_psd.columns.intersection(valid_pseudobulks)]
+    return rna_data_filtered.groupby(level=0, axis=1).mean()
+
+def create_rna_std(rna_data, atac_metadata_df, valid_pseudobulks):
+    cell_to_pseudobulk = atac_metadata_df.set_index('rna_matching_cell')['pseudobulk'].to_dict()
+    rna_data_psd = rna_data.rename(columns=cell_to_pseudobulk)
+    rna_data_filtered = rna_data_psd.loc[:, rna_data_psd.columns.intersection(valid_pseudobulks)]
+    return rna_data_filtered.groupby(level=0, axis=1).std()
+
+def find_marker_genes(rna_data, metadata_df, grouping_column, 
+                     cell_id_column='rna_matching_cell',
+                     pvalue_threshold=0.05, log_fc_threshold=0.5):
+    
+    # Create cell-to-group mapping and rename columns
+    cell_to_group = metadata_df.set_index(cell_id_column)[grouping_column].to_dict()
+    rna_data_grouped = rna_data.rename(columns=cell_to_group)
+    
+    # Compute group-level statistics
+    group_counts = rna_data_grouped.columns.value_counts()
+    rna_data_mean_group = rna_data_grouped.groupby(by=rna_data_grouped.columns, axis=1).mean()
+    rna_data_std_group = rna_data_grouped.groupby(by=rna_data_grouped.columns, axis=1).std()
+    
+    # Perform t-tests for each group
+    genes = rna_data_mean_group.index
+    groups = rna_data_mean_group.columns
+    marker_genes = {}
+    
+    for target_group in groups:        
+        other_groups = [group for group in groups if group != target_group]
+        
+        # Extract statistics for target group
+        mu1 = rna_data_mean_group[target_group]
+        sd1 = rna_data_std_group[target_group]
+        n1 = group_counts[target_group]
+    
+        mu2 = rna_data_mean_group[other_groups].mean(axis=1)
+        sd2 = rna_data_std_group[other_groups].mean(axis=1)
+        n2 = group_counts[other_groups].mean()
+        
+        # Welch's t-test with normal approximation
+        numerator = mu1 - mu2
+        denominator = np.sqrt((sd1 ** 2) / n1 + (sd2 ** 2) / n2)
+        t_stats = numerator / denominator
+        
+        t_stats = t_stats.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        p_values = 2 * (1 - norm.cdf(np.abs(t_stats)))
+        
+        _, pvals_corrected, _, _ = multipletests(p_values, method="fdr_bh")
+        
+        log_fc = mu1 - mu2
+        
+        mask = (pvals_corrected < pvalue_threshold) & (log_fc > log_fc_threshold)
+        marker_genes[target_group] = list(genes[mask])
+
+    
+    return marker_genes
