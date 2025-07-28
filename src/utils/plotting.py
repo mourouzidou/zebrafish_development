@@ -460,3 +460,64 @@ def plot_marker_gene_counts(marker_genes_dict, title="Number of Marker Genes per
 
     plt.tight_layout()
     plt.show()
+
+    import os
+def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
+                                          cell_to_psd_dist_with_markers,
+                                          cutoffs_df,
+                                          output_dir="distance_violin_plots"):
+    os.makedirs(output_dir, exist_ok=True)
+    df = pd.DataFrame({
+        "cell": list(cell_to_psd_with_markers.keys()),
+        "pseudobulk": [cell_to_psd_with_markers[c] for c in cell_to_psd_with_markers],
+        "distance": [cell_to_psd_dist_with_markers[c] for c in cell_to_psd_with_markers]
+    })
+
+    df['celltype'] = df['pseudobulk'].str.split('_').str[1:]  # Everything after first underscore
+    df['celltype'] = df['celltype'].apply(lambda x: '_'.join(x) if isinstance(x, list) else x)
+    df['stage'] = df['pseudobulk'].str.split('_').str[0]  # First part before underscore
+    
+    unique_celltypes = sorted(df['celltype'].unique())
+    all_stages = sorted(df['stage'].unique(), key=lambda x: int(x) if x.isdigit() else 999)
+    
+    fig, axes = plt.subplots(len(unique_celltypes), 1, 
+                            figsize=(max(8, len(all_stages) * 1.5), 5 * len(unique_celltypes)),
+                            sharex=True)
+    
+    if len(unique_celltypes) == 1:
+        axes = [axes]
+    
+    #  create a subplot pewr cell type
+    for idx, celltype in enumerate(unique_celltypes):
+        celltype_df = df[df['celltype'] == celltype]
+        
+        # Sort stages numerically 
+        stages = sorted(celltype_df['stage'].unique(), 
+                       key=lambda x: int(x))
+    
+        sns.violinplot(data=celltype_df, x='stage', y='distance', 
+                      inner='quartile', order=stages, palette='Set2', ax=axes[idx])
+        
+        # cutoff lines for each stage
+        for i, stage in enumerate(stages):
+            stage_pseudobulk = f"{stage}_{celltype}"
+            cutoff = cutoffs_df[cutoffs_df['pseudobulk'] == stage_pseudobulk]['cutoff'].values
+            if len(cutoff) > 0:
+                axes[idx].axhline(y=cutoff[0], color='red', linestyle='--', alpha=0.7,
+                                 xmin=(i)/(len(stages)), xmax=(i+1)/(len(stages)))
+        
+        axes[idx].set_title(f"Distance Distribution by Stage - {celltype}")
+        axes[idx].set_ylabel("Euclidean Distance")
+        
+        # Only show x-axis label on the bottom subplot
+        if idx == len(unique_celltypes) - 1:
+            axes[idx].set_xlabel("Stage")
+        else:
+            axes[idx].set_xlabel("")
+    
+    axes[0].legend()
+    plt.tight_layout()
+    plt.suptitle("Pseudobulk Enrichment: \n Distance to Closest Pseudobulk ", fontsize=16, fontweight='bold', y=1.02)
+    plt.savefig(os.path.join(output_dir, "all_celltypes_stages_violin.png"), 
+               dpi=300, bbox_inches='tight')
+    plt.close()

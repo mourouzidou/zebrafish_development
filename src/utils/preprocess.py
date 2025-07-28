@@ -821,3 +821,41 @@ def find_marker_genes(rna_data, metadata_df, grouping_column,
 
     
     return marker_genes
+
+def assign_cells_to_pseudobulks(rna_data_unmatched, rna_data_mean_pseudobulk):
+    unmatched_matrix = rna_data_unmatched.T.values 
+    pseudobulk_matrix = rna_data_mean_pseudobulk.T.values 
+    distance_matrix = cdist(unmatched_matrix, pseudobulk_matrix, metric='euclidean')
+    pseudobulk_names = list(rna_data_mean_pseudobulk.columns)
+    cell_names = list(rna_data_unmatched.columns)
+    closest_indices = np.argmin(distance_matrix, axis=1)
+    closest_pseudobulks = [pseudobulk_names[i] for i in closest_indices]
+    closest_distances = distance_matrix[np.arange(len(cell_names)), closest_indices]
+    cell_to_pseudobulk = dict(zip(cell_names, closest_pseudobulks))
+    cell_to_distance = dict(zip(cell_names, closest_distances))
+
+    return cell_to_pseudobulk, cell_to_distance
+def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
+    """Aggregate unmatched RNA by pseudobulk and merge with existing mean data"""
+    
+    common_cells = [cell for cell in rna_unmatched.columns if cell in cell_to_pseudobulk]
+    
+    pseudobulk_labels = [cell_to_pseudobulk[cell] for cell in common_cells]
+    
+    rna_unmatched_subset = rna_unmatched[common_cells].copy()
+    rna_unmatched_subset.columns = pseudobulk_labels
+    rna_unmatched_agg = rna_unmatched_subset.groupby(rna_unmatched_subset.columns, axis=1).mean()
+    
+    all_pseudobulks = set(rna_mean_all.columns) | set(rna_unmatched_agg.columns)
+    combined_data = pd.DataFrame(index=rna_mean_all.index)
+    
+    for pseudobulk in all_pseudobulks:
+        vals = []
+        if pseudobulk in rna_mean_all.columns:
+            vals.append(rna_mean_all[pseudobulk])
+        if pseudobulk in rna_unmatched_agg.columns:
+            vals.append(rna_unmatched_agg.reindex(rna_mean_all.index, fill_value=0)[pseudobulk])
+        
+        combined_data[pseudobulk] = pd.concat(vals, axis=1).mean(axis=1)
+    
+    return combined_data
