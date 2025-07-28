@@ -17,5 +17,9 @@ dependencies:
   - samtools
   - pip
   - polars
+  - nbstripout
   - pip:
       - ipykernel
+      - torch
+      - torchvision
+      - torchaudio
