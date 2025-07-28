@@ -281,8 +281,7 @@ def plot_grouped_boxplot(
     min_cells=1,
     region_palette=None,
 ):
-    """Plots boxplot of (total/mean) accessibility per cell, grouped by groupby (celltype or pseudobulk)."""
-    # Prepare label, sort groups by size
+    
     group_counts = long_df.groupby(groupby)['Cell'].nunique().sort_values(ascending=False)
     ordered_groups = group_counts.index.tolist()
     x_labels = [f"{grp}\n(n={group_counts[grp]})" for grp in ordered_groups]
@@ -320,7 +319,8 @@ def plot_grouped_boxplot(
     if show:
         plt.show()
     else:
-        plt.close()def plot_summary_accessibility(
+        plt.close()
+def plot_summary_accessibility(
     summary_df, 
     gen_info="region_type",         # "region_type" or "genomic_context"
     group_by="atac_cell_type",      # "atac_cell_type" or "pseudobulk"
@@ -328,9 +328,19 @@ def plot_grouped_boxplot(
     show=True, 
     save_path=None
 ):
-    """
-    Plots mean accessibility per cell by region/genomic context and group (cell type or pseudobulk).
-    """
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    # Set color palette based on combination of parameters
+    palette_map = {
+        ("region_type", "atac_cell_type"): "pastel",
+        ("region_type", "pseudobulk"): "muted",
+        ("genomic_context", "atac_cell_type"): "Set2",
+        ("genomic_context", "pseudobulk"): "deep",
+    }
+    # Default palette if combination not specified
+    palette = palette_map.get((gen_info, group_by), "pastel")
+
     # Column selection and labels
     if gen_info == "region_type":
         col1, col2 = "total_enhancer_accessibility", "total_promoter_accessibility"
@@ -365,14 +375,14 @@ def plot_grouped_boxplot(
         y='Accessibility',
         hue='Context',
         order=order,
-        palette='pastel'
+        palette=palette
     )
     plt.title(
         f"Mean Accessibility per Cell by {group_by.replace('_', ' ').title()} "
         f"({legend_title}) | Distance cutoff: {dist} bp"
     )
     plt.xlabel(group_by.replace('_', ' ').title())
-    plt.ylabel("Total Accessibility per Cell")
+    plt.ylabel("Mean Accessibility per Cell")
     ax.set_xticklabels(x_labels, rotation=25, ha='right', fontsize=9)
     plt.legend(title=legend_title, bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=10)
     plt.tight_layout()

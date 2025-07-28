@@ -290,7 +290,7 @@ def annotate_peaks_with_genomic_info(
     annotated = annotated[new_order]
 
     return annotated
-def compute_total_accessibility_by_region(
+def compute_mean_accessibility_by_region(
     atac_data_df, peak_region_df, region_col='region_type', value_col='Accessibility', cell_col='Cell', peak_col='Peak'
 ):
     
@@ -302,14 +302,14 @@ def compute_total_accessibility_by_region(
     # Promoter counts
     promoter_counts = (
         atac_data_df[atac_data_df[region_col] == 'promoter']
-        .groupby(cell_col)[value_col].sum()
+        .groupby(cell_col)[value_col].mean()
         .rename('total_promoter_accessibility')
         .reset_index()
     )
     # Enhancer counts
     enhancer_counts = (
         atac_data_df[atac_data_df[region_col] == 'enhancer']
-        .groupby(cell_col)[value_col].sum()
+        .groupby(cell_col)[value_col].mean()
         .rename('total_enhancer_accessibility')
         .reset_index()
     )
@@ -333,7 +333,7 @@ def summarize_peak_accessibility(
             index='Cell',
             columns='region_type',
             values='Accessibility',
-            aggfunc='sum',
+            aggfunc='mean',
             fill_value=0
         )
         .rename_axis(None, axis=1)
@@ -367,9 +367,6 @@ def summarize_peak_accessibility(
     
     return summary
 
-# Example usage:
-summary_df = summarize_peak_accessibility(atac_data_df, ann_100, atac_metadata_df)
-print(summary_df.head())
 
 def get_cell_metadata(atac_metadata_df):
     cell_meta = atac_metadata_df.rename(columns={'atac_cell': 'Cell'})[['Cell', 'atac_cell_type', 'pseudobulk']]
@@ -381,7 +378,7 @@ def summarize_accessibility(
     region_col='region_type',   # Or 'genomic_context'
     value_col='Accessibility',
     groupby='pseudobulk',       # Or 'atac_cell_type'
-    normalize_by_num_peaks=False,
+    normalize_by_num_peaks=True,
     min_cells=1,
     region_include=None,        # List of region types to include
     region_exclude=None         # List of region types to exclude
