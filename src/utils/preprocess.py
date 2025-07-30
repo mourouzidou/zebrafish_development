@@ -8,6 +8,10 @@ from pathlib import Path
 import seaborn as sns
 import re
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+from scipy.stats import norm
+import os
+
 
 
 def one_hot_encode(sequence):
@@ -26,10 +30,7 @@ def quantile_normalize(x, axis=0):
     xqtrl = meanx[np.argsort(np.argsort(x, axis=axis), axis=axis)]
     return xqtrl
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import re
+
 
 def extract_stage_number(stage_str):
     match = re.search(r'(\d+)', str(stage_str))
@@ -836,8 +837,6 @@ def assign_cells_to_pseudobulks(rna_data_unmatched, rna_data_mean_pseudobulk):
 
     return cell_to_pseudobulk, cell_to_distance
 def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
-    """Aggregate unmatched RNA by pseudobulk and merge with existing mean data"""
-    
     common_cells = [cell for cell in rna_unmatched.columns if cell in cell_to_pseudobulk]
     
     pseudobulk_labels = [cell_to_pseudobulk[cell] for cell in common_cells]
@@ -859,3 +858,26 @@ def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
         combined_data[pseudobulk] = pd.concat(vals, axis=1).mean(axis=1)
     
     return combined_data
+
+
+
+
+# ___________________________________________________________________________
+#              Lifelong
+#____________________________________________________________________________\
+
+
+def merge_cluster_metadata(modality):
+    stages = [1.5, 2, 3, 5, 14, 60, 210]
+    data_dir = "../../data/lifelong/raw/metadata_clusters"
+    dfs = []
+    
+    for stage in stages:
+        filepath = os.path.join(data_dir, f"{modality}_dpf{stage}_metadata.tsv")
+        if os.path.exists(filepath):
+            df = pd.read_csv(filepath, sep='\t')
+            df['stage_dpf'] = stage
+            df['pseudobulk'] = df['stage_dpf'].astype(str) + '_' + df['annotation'].astype(str)
+            dfs.append(df[['cell', 'peak_region_fragments', 'stage_dpf', 'annotation', 'pseudobulk']])
+    
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()

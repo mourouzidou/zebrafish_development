@@ -461,7 +461,72 @@ def plot_marker_gene_counts(marker_genes_dict, title="Number of Marker Genes per
     plt.tight_layout()
     plt.show()
 
-    import os
+def plot_marker_gene_fold_change(marker_genes_all, marker_genes_filtered, title="Fold Change in Marker Gene Counts"):
+    def extract_stage(group_name):
+        try:
+            return int(group_name.split('_')[0])
+        except:
+            return float('inf')
+
+    all_groups = set(marker_genes_all.keys()) | set(marker_genes_filtered.keys())
+    sorted_groups = sorted(all_groups, key=extract_stage)
+
+    fold_changes = []
+    for group in sorted_groups:
+        count_all = len(marker_genes_all.get(group, []))
+        count_filtered = len(marker_genes_filtered.get(group, []))
+        if count_all > 0:
+            fc = count_filtered / count_all
+        else:
+            fc = float('inf') if count_filtered > 0 else 1
+        fold_changes.append(fc)
+
+    capped_fc = [min(fc, 2.0) if fc != float('inf') else 2.0 for fc in fold_changes]
+
+    plt.figure(figsize=(14, 6))
+    bars = plt.bar(sorted_groups, capped_fc, alpha=0.8, color='slategrey')
+    plt.axhline(1.0, color='red', linestyle='--', label='No change')
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel("Pseudobulk")
+    plt.ylabel("Fold change (Filtered / All)")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    for bar, fc in zip(bars, fold_changes):
+        label = f"{fc:.1f}" if fc != float('inf') else "inf"
+        plt.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.05, 
+                 label, ha='center', va='bottom', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+def plot_marker_gene_counts(marker_genes_dict, title="Number of Marker Genes per Pseudobulk"):
+    def extract_stage(group_name):
+        try:
+            return int(group_name.split('_')[0])
+        except:
+            return float('inf')
+
+    sorted_groups = sorted(marker_genes_dict.keys(), key=extract_stage)
+    counts = [len(marker_genes_dict[group]) for group in sorted_groups]
+
+    plt.figure(figsize=(14, 6))
+    bars = plt.bar(sorted_groups, counts, alpha=0.8, color='steelblue')
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel("Pseudobulk")
+    plt.ylabel("Number of Marker Genes")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+
+    for bar, count in zip(bars, counts):
+        plt.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1, 
+                 str(count), ha='center', va='bottom', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
 def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
                                           cell_to_psd_dist_with_markers,
                                           cutoffs_df,
@@ -521,3 +586,42 @@ def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
     plt.savefig(os.path.join(output_dir, "all_celltypes_stages_violin.png"), 
                dpi=300, bbox_inches='tight')
     plt.close()
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_pseudobulk_distributions(df, max_pseudobulks=None, save_path=None, show=True):
+    cell_counts = df['pseudobulk'].value_counts()
+    order = cell_counts.index.tolist()
+    
+    if max_pseudobulks:
+        order = order[:max_pseudobulks]
+        df = df[df['pseudobulk'].isin(order)]
+        cell_counts = cell_counts.loc[order]
+    
+    x_labels = [f"{pb}\n(n={cell_counts[pb]})" for pb in order]
+    
+    plt.figure(figsize=(32, 12))
+    ax = sns.boxplot(
+        data=df,
+        x='pseudobulk',
+        y='peak_region_fragments',
+        hue='annotation',
+        order=order,
+        showfliers=False,
+        palette='tab20'
+    )
+    
+    ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=6, linespacing=1.7)
+    plt.xlabel("Pseudobulk (sorted by #cells)", fontsize=12, fontweight='bold')
+    plt.ylabel("Peak Region Fragments per Cell", fontsize=12)
+    plt.title("ATAC Fragments per Cell by Pseudobulk and Annotation", fontsize=12)
+    plt.legend(title="Annotation", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=6)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=250)
+    if show:
+        plt.show()
+    else:
+        plt.close()
