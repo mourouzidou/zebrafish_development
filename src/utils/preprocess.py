@@ -867,7 +867,7 @@ def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
 #____________________________________________________________________________\
 
 
-def merge_cluster_metadata(modality):
+def merge_cluster_metadata(modality, counts_col):
     stages = [1.5, 2, 3, 5, 14, 60, 210]
     data_dir = "../../data/lifelong/raw/metadata_clusters"
     dfs = []
@@ -878,6 +878,6 @@ def merge_cluster_metadata(modality):
             df = pd.read_csv(filepath, sep='\t')
             df['stage_dpf'] = stage
             df['pseudobulk'] = df['stage_dpf'].astype(str) + '_' + df['annotation'].astype(str)
-            dfs.append(df[['cell', 'peak_region_fragments', 'stage_dpf', 'annotation', 'pseudobulk']])
+            dfs.append(df[['cell', counts_col, 'stage_dpf', 'annotation', 'pseudobulk']])
     
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()

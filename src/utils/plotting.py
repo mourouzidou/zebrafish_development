@@ -587,10 +587,8 @@ def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
                dpi=300, bbox_inches='tight')
     plt.close()
 
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-def plot_pseudobulk_distributions(df, max_pseudobulks=None, save_path=None, show=True):
+def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path=None, show=True):
     cell_counts = df['pseudobulk'].value_counts()
     order = cell_counts.index.tolist()
     
@@ -601,11 +599,11 @@ def plot_pseudobulk_distributions(df, max_pseudobulks=None, save_path=None, show
     
     x_labels = [f"{pb}\n(n={cell_counts[pb]})" for pb in order]
     
-    plt.figure(figsize=(32, 12))
+    plt.figure(figsize=(32, 16))
     ax = sns.boxplot(
         data=df,
         x='pseudobulk',
-        y='peak_region_fragments',
+        y=count_col,
         hue='annotation',
         order=order,
         showfliers=False,
@@ -614,13 +612,69 @@ def plot_pseudobulk_distributions(df, max_pseudobulks=None, save_path=None, show
     
     ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=6, linespacing=1.7)
     plt.xlabel("Pseudobulk (sorted by #cells)", fontsize=12, fontweight='bold')
-    plt.ylabel("Peak Region Fragments per Cell", fontsize=12)
-    plt.title("ATAC Fragments per Cell by Pseudobulk and Annotation", fontsize=12)
+    plt.ylabel(f"{count_col} per Cell", fontsize=12)
+    plt.title(f"{count_col} per Cell by Pseudobulk and Annotation", fontsize=12)
     plt.legend(title="Annotation", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=6)
     plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=250)
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_reads_per_cell_by_celltype_and_stage(
+    df,
+    count_col,
+    min_cells_per_group=10,
+    figsize=(18, 12),
+    save_path=None,
+    show=True
+):
+    df_reads = df.dropna(subset=['annotation', 'stage_dpf']).copy()
+    
+    # Convert stage to float for proper sorting
+    df_reads['stage_dpf_num'] = df_reads['stage_dpf'].astype(float)
+    
+    # Filter to groups with enough cells
+    ct_stage_counts = df_reads.groupby(['annotation', 'stage_dpf_num']).size().reset_index(name='count')
+    good = ct_stage_counts[ct_stage_counts['count'] >= min_cells_per_group]
+    df_reads = df_reads.merge(
+        good[['annotation', 'stage_dpf_num']],
+        on=['annotation', 'stage_dpf_num'],
+        how='inner'
+    )
+    
+    # Get sorted stages for proper ordering
+    sorted_stages = sorted(df_reads['stage_dpf_num'].unique())
+    
+    # Create color palette with proper ordering
+    n_stages = len(sorted_stages)
+    colors = sns.color_palette('Spectral', n_stages)
+    stage_colors = dict(zip(sorted_stages, colors))
+    
+    plt.figure(figsize=figsize)
+    sns.boxplot(
+        data=df_reads,
+        x='annotation',
+        y=count_col,
+        hue='stage_dpf_num',
+        hue_order=sorted_stages,
+        showfliers=False,
+        palette=stage_colors
+    )
+    
+    plt.xlabel('Cell Type')
+    plt.ylabel(count_col)
+    plt.title(f'{count_col} per Cell by Cell Type and Stage')
+    plt.legend(title='Stage (dpf)', bbox_to_anchor=(1.01, 1), loc='upper left')
+    plt.xticks(rotation=25, ha='right')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=200)
     if show:
         plt.show()
     else:
