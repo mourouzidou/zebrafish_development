@@ -868,7 +868,7 @@ def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
 
 
 def merge_cluster_metadata(modality, counts_col):
-    stages = [1.5, 2, 3, 5, 14, 60, 210]
+    stages = [1.5, 2, 3, 5, 14, 60, 150, 210]
     data_dir = "../../data/lifelong/raw/metadata_clusters"
     dfs = []
     

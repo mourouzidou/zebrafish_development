@@ -588,6 +588,10 @@ def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
     plt.close()
 
 
+
+
+
+
 def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path=None, show=True):
     cell_counts = df['pseudobulk'].value_counts()
     order = cell_counts.index.tolist()
@@ -634,11 +638,8 @@ def plot_reads_per_cell_by_celltype_and_stage(
     show=True
 ):
     df_reads = df.dropna(subset=['annotation', 'stage_dpf']).copy()
-    
-    # Convert stage to float for proper sorting
     df_reads['stage_dpf_num'] = df_reads['stage_dpf'].astype(float)
-    
-    # Filter to groups with enough cells
+
     ct_stage_counts = df_reads.groupby(['annotation', 'stage_dpf_num']).size().reset_index(name='count')
     good = ct_stage_counts[ct_stage_counts['count'] >= min_cells_per_group]
     df_reads = df_reads.merge(
@@ -646,15 +647,15 @@ def plot_reads_per_cell_by_celltype_and_stage(
         on=['annotation', 'stage_dpf_num'],
         how='inner'
     )
-    
-    # Get sorted stages for proper ordering
+
+    # Sort cell types alphabetically
+    sorted_cell_types = sorted(df_reads['annotation'].unique())
     sorted_stages = sorted(df_reads['stage_dpf_num'].unique())
-    
-    # Create color palette with proper ordering
+
     n_stages = len(sorted_stages)
     colors = sns.color_palette('Spectral', n_stages)
     stage_colors = dict(zip(sorted_stages, colors))
-    
+
     plt.figure(figsize=figsize)
     sns.boxplot(
         data=df_reads,
@@ -662,17 +663,17 @@ def plot_reads_per_cell_by_celltype_and_stage(
         y=count_col,
         hue='stage_dpf_num',
         hue_order=sorted_stages,
+        order=sorted_cell_types,
         showfliers=False,
         palette=stage_colors
     )
-    
-    plt.xlabel('Cell Type')
+
+    plt.xlabel('Cell Type (alphabetical)')
     plt.ylabel(count_col)
     plt.title(f'{count_col} per Cell by Cell Type and Stage')
     plt.legend(title='Stage (dpf)', bbox_to_anchor=(1.01, 1), loc='upper left')
     plt.xticks(rotation=25, ha='right')
     plt.tight_layout()
-    
     if save_path:
         plt.savefig(save_path, dpi=200)
     if show:
