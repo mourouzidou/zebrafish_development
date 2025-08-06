@@ -692,7 +692,7 @@ def plot_reads_per_cell_by_celltype_and_stage(
         plt.legend(title='Cell Type', bbox_to_anchor=(1.01, 1), loc='upper left')
     
     plt.ylabel(count_col)
-    plt.title(f'{count_col} per Cell by {"Cell Type and Stage" if group_by == "celltype" else "Stage and Cell Type"}')
+    plt.title(f'{count_col} per Cell by {"Cell Type and Stage" if group_by == "celltype" else "Stage and Cell Type"} at least {min_cells_per_group}')
     plt.tight_layout()
     
     if save_path:
@@ -876,39 +876,3 @@ def plot_mean_vs_std_by_celltype_and_stage(
     plt.subplots_adjust(top=0.9)
     plt.show()
 
-def plot_mean_vs_mean(
-    df,
-    x_col='mean_atac',
-    y_col='mean_rna',
-    x_label='ATAC mean',
-    y_label='RNA mean',
-    title='ATAC vs RNA Mean Signal',
-    hue='stage_dpf',
-    style='cell_type',
-    figsize=(8, 6)
-):
-    df = df.copy()
-    
-    # Harmonize adult stages
-    if hue == 'stage_dpf' and df[hue].dtype in [float, int, 'float64', 'int64']:
-        df[hue] = df[hue].replace({150.0: 'adult', 210.0: 'adult'})
-    
-    plt.figure(figsize=figsize)
-    ax = sns.scatterplot(
-        data=df,
-        x=x_col,
-        y=y_col,
-        hue=hue,
-        style=style,
-        s=100,
-        edgecolor='black',
-        linewidth=0.5
-    )
-    max_val = max(df[x_col].max(), df[y_col].max())
-    ax.plot([0, max_val], [0, max_val], ls='--', color='gray', label='y=x')  # reference line
-    plt.xlabel(x_label)
-    plt.ylabel(y_label)
-    plt.title(title)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
-    plt.tight_layout()
-    plt.show()
