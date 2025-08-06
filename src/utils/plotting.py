@@ -756,3 +756,159 @@ def plot_pseudobulk_cell_counts(atac_cells_to_psd, rna_cells_to_psd):
     plt.legend(title='Modality')
     plt.tight_layout()
     plt.show()
+
+
+
+def lineplot_mean_std_by_stage(df, signal_col='peak_region_fragments', stage_col='stage_dpf', celltype_col='annotation'):
+    
+    # Group and summarize
+    summary_df = df.groupby([celltype_col, stage_col]).agg(
+        mean_signal=(signal_col, 'mean'),
+        std_signal=(signal_col, 'std'),
+        n=(signal_col, 'count')
+    ).reset_index()
+
+    summary_df['sem'] = summary_df['std_signal'] / summary_df['n']**0.5
+
+    # Create figure with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharex=True)
+
+    # Plot mean
+    sns.lineplot(
+        data=summary_df,
+        x=stage_col, y='mean_signal',
+        hue=celltype_col, marker='o', ax=axes[0]
+    )
+    axes[0].set_title("Mean Signal per Cell Type Across Stages")
+    axes[0].set_xlabel("Stage (dpf)")
+    axes[0].set_ylabel("Mean " + signal_col)
+    axes[0].tick_params(axis='x', rotation=45)
+
+    # Plot std
+    sns.lineplot(
+        data=summary_df,
+        x=stage_col, y='std_signal',
+        hue=celltype_col, marker='o', ax=axes[1]
+    )
+    axes[1].set_title("STD of Signal per Cell Type Across Stages")
+    axes[1].set_xlabel("Stage (dpf)")
+    axes[1].set_ylabel("Standard Deviation of " + signal_col)
+    axes[1].tick_params(axis='x', rotation=45)
+
+    # Adjust legend
+    axes[1].legend_.remove()
+    axes[0].legend(title='Cell type', bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_mean_vs_std_by_celltype_and_stage(
+    df, 
+    signal_col, 
+    celltype_col='annotation', 
+    stage_col='stage_dpf', 
+    modality_label='ATAC'
+):
+    def stage_sort_key(stage):
+        return 1.5 if stage == 1.5 else float(stage) if isinstance(stage, (int, float)) else 1000
+
+    stats_df = df.groupby([celltype_col, stage_col])[signal_col].agg(['mean', 'std', 'count']).reset_index()
+    stats_df.columns = ['cell_type', 'stage_dpf', 'mean_signal', 'std_signal', 'n_cells']
+    stats_df['std_signal'] = stats_df['std_signal'].fillna(0)
+    stats_df['stage_dpf_sorted'] = stats_df['stage_dpf'].apply(stage_sort_key)
+    stats_df = stats_df.sort_values('stage_dpf_sorted').drop('stage_dpf_sorted', axis=1)
+
+    cell_types = sorted(stats_df['cell_type'].unique())
+    stages = sorted(stats_df['stage_dpf'].unique(), key=stage_sort_key)
+    n_cell_types = len(cell_types)
+    n_cols = min(4, n_cell_types)
+    n_rows = (n_cell_types + n_cols - 1) // n_cols
+    colors = plt.cm.tab10(np.linspace(0, 1, len(stages)))
+    stage_color_map = dict(zip(stages, colors))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    if n_cell_types == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+
+    for idx, cell_type in enumerate(cell_types):
+        ax = axes[idx]
+        cell_data = stats_df[stats_df['cell_type'] == cell_type]
+        for _, row in cell_data.iterrows():
+            stage = row['stage_dpf']
+            mean_val = row['mean_signal']
+            std_val = row['std_signal']
+            ax.scatter(mean_val, std_val,
+                       color=stage_color_map[stage],
+                       s=100, alpha=0.7, edgecolors='black', linewidth=1,
+                       label=f'{stage} dpf (n={row["n_cells"]})')
+            ax.annotate(f'{stage}', (mean_val, std_val),
+                        xytext=(5, 5), textcoords='offset points',
+                        fontsize=8, ha='left')
+
+        ax.set_xlabel(f'Mean {modality_label} Signal')
+        ax.set_ylabel('Standard Deviation')
+        ax.set_title(f'{cell_type}', fontsize=11, weight='bold')
+        ax.grid(True, alpha=0.3)
+
+        if len(stages) <= 8:
+            ax.legend(fontsize=8, loc='best', framealpha=0.8)
+
+        if len(cell_data) > 0:
+            x_margin = (cell_data['mean_signal'].max() - cell_data['mean_signal'].min()) * 0.1
+            y_margin = (cell_data['std_signal'].max() - cell_data['std_signal'].min()) * 0.1
+            ax.set_xlim(cell_data['mean_signal'].min() - x_margin, cell_data['mean_signal'].max() + x_margin)
+            ax.set_ylim(max(0, cell_data['std_signal'].min() - y_margin), cell_data['std_signal'].max() + y_margin)
+
+    for idx in range(n_cell_types, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle(f'{modality_label} | Mean vs Std of Signal by Cell Type and Stage',
+                 fontsize=14, weight='bold')
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9)
+    plt.show()
+
+def plot_mean_vs_mean(
+    df,
+    x_col='mean_atac',
+    y_col='mean_rna',
+    x_label='ATAC mean',
+    y_label='RNA mean',
+    title='ATAC vs RNA Mean Signal',
+    hue='stage_dpf',
+    style='cell_type',
+    figsize=(8, 6)
+):
+    df = df.copy()
+    
+    # Harmonize adult stages
+    if hue == 'stage_dpf' and df[hue].dtype in [float, int, 'float64', 'int64']:
+        df[hue] = df[hue].replace({150.0: 'adult', 210.0: 'adult'})
+    
+    plt.figure(figsize=figsize)
+    ax = sns.scatterplot(
+        data=df,
+        x=x_col,
+        y=y_col,
+        hue=hue,
+        style=style,
+        s=100,
+        edgecolor='black',
+        linewidth=0.5
+    )
+    max_val = max(df[x_col].max(), df[y_col].max())
+    ax.plot([0, max_val], [0, max_val], ls='--', color='gray', label='y=x')  # reference line
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    plt.tight_layout()
+    plt.show()
