@@ -635,11 +635,12 @@ def plot_reads_per_cell_by_celltype_and_stage(
     min_cells_per_group=10,
     figsize=(18, 12),
     save_path=None,
-    show=True
+    show=True,
+    group_by='celltype'  # 'celltype' or 'stage'
 ):
     df_reads = df.dropna(subset=['annotation', 'stage_dpf']).copy()
     df_reads['stage_dpf_num'] = df_reads['stage_dpf'].astype(float)
-
+    
     ct_stage_counts = df_reads.groupby(['annotation', 'stage_dpf_num']).size().reset_index(name='count')
     good = ct_stage_counts[ct_stage_counts['count'] >= min_cells_per_group]
     df_reads = df_reads.merge(
@@ -647,36 +648,111 @@ def plot_reads_per_cell_by_celltype_and_stage(
         on=['annotation', 'stage_dpf_num'],
         how='inner'
     )
-
-    # Sort cell types alphabetically
+    
     sorted_cell_types = sorted(df_reads['annotation'].unique())
     sorted_stages = sorted(df_reads['stage_dpf_num'].unique())
-
-    n_stages = len(sorted_stages)
-    colors = sns.color_palette('Spectral', n_stages)
-    stage_colors = dict(zip(sorted_stages, colors))
-
+    
     plt.figure(figsize=figsize)
-    sns.boxplot(
-        data=df_reads,
-        x='annotation',
-        y=count_col,
-        hue='stage_dpf_num',
-        hue_order=sorted_stages,
-        order=sorted_cell_types,
-        showfliers=False,
-        palette=stage_colors
-    )
-
-    plt.xlabel('Cell Type (alphabetical)')
+    
+    if group_by == 'celltype':
+        n_stages = len(sorted_stages)
+        colors = sns.color_palette('Spectral', n_stages)
+        stage_colors = dict(zip(sorted_stages, colors))
+        
+        sns.boxplot(
+            data=df_reads,
+            x='annotation',
+            y=count_col,
+            hue='stage_dpf_num',
+            hue_order=sorted_stages,
+            order=sorted_cell_types,
+            showfliers=False,
+            palette=stage_colors
+        )
+        plt.xlabel('Cell Type (alphabetical)')
+        plt.legend(title='Stage (dpf)', bbox_to_anchor=(1.01, 1), loc='upper left')
+        plt.xticks(rotation=25, ha='right')
+        
+    else:  # group_by == 'stage'
+        n_celltypes = len(sorted_cell_types)
+        colors = sns.color_palette('tab20', n_celltypes)
+        celltype_colors = dict(zip(sorted_cell_types, colors))
+        
+        sns.boxplot(
+            data=df_reads,
+            x='stage_dpf_num',
+            y=count_col,
+            hue='annotation',
+            hue_order=sorted_cell_types,
+            order=sorted_stages,
+            showfliers=False,
+            palette=celltype_colors
+        )
+        plt.xlabel('Stage (dpf)')
+        plt.legend(title='Cell Type', bbox_to_anchor=(1.01, 1), loc='upper left')
+    
     plt.ylabel(count_col)
-    plt.title(f'{count_col} per Cell by Cell Type and Stage')
-    plt.legend(title='Stage (dpf)', bbox_to_anchor=(1.01, 1), loc='upper left')
-    plt.xticks(rotation=25, ha='right')
+    plt.title(f'{count_col} per Cell by {"Cell Type and Stage" if group_by == "celltype" else "Stage and Cell Type"}')
     plt.tight_layout()
+    
     if save_path:
         plt.savefig(save_path, dpi=200)
     if show:
         plt.show()
     else:
         plt.close()
+
+
+def plot_pseudobulk_cell_counts(atac_cells_to_psd, rna_cells_to_psd):
+    def normalize(pseudobulk_name):
+        parts = pseudobulk_name.split('_')
+        if len(parts) > 1 and parts[0] in ['150', '210']:
+            return 'adult_' + '_'.join(parts[1:])
+        return pseudobulk_name
+
+    def sort_key(name):
+        parts = name.split('_')
+        if len(parts) > 1:
+            try:
+                if parts[0] in ['1.5']:
+                    return (1.5, parts[0])
+                elif parts[0] == 'adult':
+                    return (999, parts[0])
+                else:
+                    return (float(parts[0]), parts[0])
+            except ValueError:
+                return (1000, parts[0])
+        return (1001, name)
+
+    # Normalize pseudobulk names
+    atac_norm = atac_cells_to_psd.copy()
+    atac_norm['pseudobulk'] = atac_norm['pseudobulk'].apply(normalize)
+
+    rna_norm = rna_cells_to_psd.copy()
+    rna_norm['pseudobulk'] = rna_norm['pseudobulk'].apply(normalize)
+
+    # Count cells per pseudobulk
+    atac_counts = atac_norm['pseudobulk'].value_counts().rename('ATAC').reset_index()
+    atac_counts.columns = ['pseudobulk', 'ATAC']
+
+    rna_counts = rna_norm['pseudobulk'].value_counts().rename('RNA').reset_index()
+    rna_counts.columns = ['pseudobulk', 'RNA']
+
+    # Merge and prepare plot data
+    merged = pd.merge(atac_counts, rna_counts, on='pseudobulk', how='outer').fillna(0)
+    sorted_names = sorted(merged['pseudobulk'].unique(), key=sort_key)
+
+    plot_df = merged.melt(id_vars='pseudobulk', value_vars=['ATAC', 'RNA'],
+                          var_name='Modality', value_name='Cell count')
+    plot_df['pseudobulk'] = pd.Categorical(plot_df['pseudobulk'], categories=sorted_names, ordered=True)
+
+    # Plotting
+    plt.figure(figsize=(min(40, len(sorted_names) * 0.7), 8))
+    sns.barplot(data=plot_df, x='pseudobulk', y='Cell count', hue='Modality')
+    plt.xticks(rotation=90, ha='right', fontsize=8)
+    plt.xlabel('Pseudobulk')
+    plt.ylabel('Cell count')
+    plt.title('Cell Population per Pseudobulk: ATAC vs RNA (150_ and 210_ merged as adult_)')
+    plt.legend(title='Modality')
+    plt.tight_layout()
+    plt.show()
