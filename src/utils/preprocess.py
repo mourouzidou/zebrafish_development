@@ -881,3 +881,41 @@ def merge_cluster_metadata(modality, counts_col):
             dfs.append(df[['cell', counts_col, 'stage_dpf', 'annotation', 'pseudobulk']])
     
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
+def plot_mean_vs_mean(
+    df,
+    x_col='mean_atac',
+    y_col='mean_rna',
+    x_label='ATAC mean',
+    y_label='RNA mean',
+    title='ATAC vs RNA Mean Signal',
+    hue='stage_dpf',
+    style='cell_type',
+    figsize=(8, 6)
+):
+    df = df.copy()
+    
+    # Harmonize adult stages
+    if hue == 'stage_dpf' and df[hue].dtype in [float, int, 'float64', 'int64']:
+        df[hue] = df[hue].replace({150.0: 'adult', 210.0: 'adult'})
+    
+    plt.figure(figsize=figsize)
+    ax = sns.scatterplot(
+        data=df,
+        x=x_col,
+        y=y_col,
+        hue=hue,
+        style=style,
+        s=100,
+        edgecolor='black',
+        linewidth=0.5
+    )
+    max_val = max(df[x_col].max(), df[y_col].max())
+    ax.plot([0, max_val], [0, max_val], ls='--', color='gray', label='y=x')  # reference line
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    plt.tight_layout()
+    plt.show()

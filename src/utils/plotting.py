@@ -692,7 +692,7 @@ def plot_reads_per_cell_by_celltype_and_stage(
         plt.legend(title='Cell Type', bbox_to_anchor=(1.01, 1), loc='upper left')
     
     plt.ylabel(count_col)
-    plt.title(f'{count_col} per Cell by {"Cell Type and Stage" if group_by == "celltype" else "Stage and Cell Type"} at least {min_cells_per_group}')
+    plt.title(f'{count_col} per Cell by {"Cell Type and Stage" if group_by == "celltype" else "Stage and Cell Type"} at least {min_cells_per_group} cells')
     plt.tight_layout()
     
     if save_path:
