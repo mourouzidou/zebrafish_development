@@ -865,22 +865,44 @@ def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
 # ___________________________________________________________________________
 #              Lifelong
 #____________________________________________________________________________\
+import os
+import pandas as pd
 
+def merge_cluster_metadata(
+    modality,
+    counts_col,
+    concat=True,
+    stages=None,
+    data_dir="../../data/lifelong/raw/metadata_clusters",
+):
+    stages = stages or [1.5, 2, 3, 5, 14, 60, 150, 210]
+    cols = ['cell', counts_col, 'stage_dpf', 'annotation', 'pseudobulk']
 
-def merge_cluster_metadata(modality, counts_col):
-    stages = [1.5, 2, 3, 5, 14, 60, 150, 210]
-    data_dir = "../../data/lifelong/raw/metadata_clusters"
-    dfs = []
-    
+    frames = []
+    by_stage = {}
+
     for stage in stages:
         filepath = os.path.join(data_dir, f"{modality}_dpf{stage}_metadata.tsv")
-        if os.path.exists(filepath):
-            df = pd.read_csv(filepath, sep='\t')
-            df['stage_dpf'] = stage
-            df['pseudobulk'] = df['stage_dpf'].astype(str) + '_' + df['annotation'].astype(str)
-            dfs.append(df[['cell', counts_col, 'stage_dpf', 'annotation', 'pseudobulk']])
-    
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+        if not os.path.exists(filepath):
+            continue
+
+        df = pd.read_csv(filepath, sep='\t')
+        df['stage_dpf'] = stage
+        df['pseudobulk'] = df['stage_dpf'].astype(str) + '_' + df['annotation'].astype(str)
+        df = df[cols]
+
+        if concat:
+            frames.append(df)
+        else:
+            by_stage[stage] = df
+
+    if concat:
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
+    else:
+        # Ensure all requested stages have an entry (empty df with the same columns if missing)
+        for stage in stages:
+            by_stage.setdefault(stage, pd.DataFrame(columns=cols))
+        return by_stage
 
 
 def plot_mean_vs_mean(
@@ -919,3 +941,54 @@ def plot_mean_vs_mean(
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
     plt.tight_layout()
     plt.show()
+
+def rename_atac_columns_to_pseudobulk(counts_dir, metadata_by_stage, stages=(1.5, 2, 3, 5, 14, 60, 150, 210)):
+    renamed_by_stage = {}
+
+    for stage in stages:
+        meta = metadata_by_stage.get(stage)
+        if meta is None or meta.empty:
+            print(f"[skip] No metadata for stage {stage}")
+            continue
+
+        mapping = dict(meta[['cell', 'pseudobulk']].values)
+
+        counts_file = os.path.join(counts_dir, f"dpf{stage}_atac_counts.csv")
+        if not os.path.exists(counts_file):
+            print(f"[skip] File not found for stage {stage}")
+            continue
+
+        df = pd.read_csv(counts_file, index_col=0)
+        renamed_df = df.rename(columns=mapping)
+        renamed_by_stage[stage] = renamed_df
+
+    return renamed_by_stage
+
+
+def rename_rna_columns_to_pseudobulk(
+    counts_dir,
+    metadata_by_stage,              # dict: stage -> df with ['cell','pseudobulk']
+    stages=(1.5, 2, 3, 5, 14, 60, 150, 210),
+):
+    """Load dpf{stage}_rna_counts.csv and rename columns from cell -> pseudobulk."""
+    renamed_by_stage = {}
+
+    def stage_str(s):  # 1.5 -> "1_5"
+        return str(s).replace('.', '_')
+
+    for stage in stages:
+        meta = metadata_by_stage.get(stage)
+        if meta is None or meta.empty:
+            print(f"[skip] no RNA metadata for stage {stage}")
+            continue
+
+        mapping = dict(meta[['cell', 'pseudobulk']].values)
+        counts_file = os.path.join(counts_dir, f"dpf{stage_str(stage)}_rna_counts.csv")
+        if not os.path.exists(counts_file):
+            print(f"[skip] {counts_file} not found")
+            continue
+
+        df = pd.read_csv(counts_file, index_col=0)
+        renamed_by_stage[stage] = df.rename(columns=mapping)
+
+    return renamed_by_stage
