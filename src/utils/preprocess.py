@@ -12,6 +12,7 @@ from scipy.spatial.distance import cdist
 from scipy.stats import norm
 import os
 from pathlib import Path
+import glob
 
 
 def one_hot_encode(sequence):
@@ -1022,3 +1023,20 @@ def load_and_stack_data(base_dir="../../data/lifelong/raw"):
     rna_df  = pd.concat([pd.read_parquet(f) for f in rna_files], axis=1)
     
     return atac_df, rna_df
+
+def rename_columns_with_pseudobulk(df, mapping_df, cell_col='atac_cell', name_col='pseudobulk'):
+   
+    mapping_dict = dict(zip(mapping_df[cell_col], mapping_df[name_col]))
+    return df.rename(columns=mapping_dict)
+
+
+def pseudobulk_aggregate(df, mapping_df, cell_col='atac_cell', name_col='pseudobulk'):
+    
+    raw_map = dict(zip(mapping_df[cell_col], mapping_df[name_col]))
+    df = df.loc[:, df.columns.intersection(mapping_df[cell_col])]
+    col_map = {c: raw_map[c] for c in df.columns}
+
+    renamed = df.rename(columns=col_map)
+    mean_df = renamed.groupby(axis=1, level=0).mean()
+    std_df  = renamed.groupby(axis=1, level=0).agg(lambda x: x.std(ddof=0))
+    return mean_df, std_df
