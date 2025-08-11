@@ -13,6 +13,8 @@ from scipy.stats import norm
 import os
 from pathlib import Path
 import glob
+import os, re, math
+from itertools import combinations
 
 
 def one_hot_encode(sequence):
@@ -1040,3 +1042,178 @@ def pseudobulk_aggregate(df, mapping_df, cell_col='atac_cell', name_col='pseudob
     mean_df = renamed.groupby(axis=1, level=0).mean()
     std_df  = renamed.groupby(axis=1, level=0).agg(lambda x: x.std(ddof=0))
     return mean_df, std_df
+
+def pseudobulk_aggregate_stream(df, mapping_df, cell_col='atac_cell', name_col='pseudobulk',
+                                dtype='float32', ddof=0, progress=False):
+    
+    raw_map = dict(zip(mapping_df[cell_col].astype(str), mapping_df[name_col].astype(str)))
+    cols = [c for c in df.columns if c in raw_map]
+
+    groups = {}
+    for c in cols:
+        g = raw_map[c]
+        groups.setdefault(g, []).append(c)
+
+    n = len(df)
+    mean_out = {}
+    std_out  = {}
+
+    for g, gcols in groups.items():
+        k = len(gcols)
+        s  = np.zeros(n, dtype=np.float64)   # sum
+        ss = np.zeros(n, dtype=np.float64)   # sum of squares
+        for c in gcols:
+            x = df[c].to_numpy(copy=False)
+            if not np.issubdtype(x.dtype, np.number):
+                x = pd.to_numeric(df[c], errors='coerce').to_numpy()
+            s  += x
+            ss += x * x
+
+        mean = s / k
+        if ddof == 0:
+            var = ss / k - mean**2            # population variance
+        else:
+            var = (ss - k * mean**2) / max(k - 1, 1)  # sample variance
+
+        var[var < 0] = 0                      # numeric floor
+        mean_out[g] = mean.astype(dtype, copy=False)
+        std_out[g]  = np.sqrt(var, dtype=np.float64).astype(dtype, copy=False)
+        if progress:
+            print(f"{g}: {k} cols")
+
+    mean_df = pd.DataFrame(mean_out, index=df.index)
+    std_df  = pd.DataFrame(std_out,  index=df.index)
+    return mean_df, std_df
+
+
+import os, re, math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from itertools import combinations
+
+def plot_pairwise_stage_scatter_per_celltype(
+    df: pd.DataFrame,
+    outdir: str = "plots/atac_pairwise",
+    title_prefix: str = "ATAC",
+    sample: int | None = 200_000,       # downsample points per panel (None = all)
+    robust_limit: float = 0.999,         # cap axes at this upper quantile
+    dpi: int = 200,
+    save: bool = True,
+    show: bool = False
+):
+    """
+    df columns must be "<stage>_<celltype>" (e.g., "14_teeth", "60_gill progenitor 1").
+    For each celltype, create a figure with all pairwise stage comparisons (scatter + y=x).
+    Saves one PNG per celltype in `outdir` when save=True, and/or shows figures in the
+    notebook when show=True.
+    """
+    if save:
+        os.makedirs(outdir, exist_ok=True)
+
+    # parse columns -> (stage, celltype)
+    parsed = []
+    for col in df.columns:
+        if "_" in col:
+            stage, celltype = col.split("_", 1)   # first "_" separates stage from celltype
+            parsed.append((stage, celltype, col))
+    if not parsed:
+        raise ValueError("No columns matched the '<stage>_<celltype>' pattern.")
+
+    # group columns by celltype
+    by_celltype: dict[str, dict[str, str]] = {}
+    for stage, celltype, col in parsed:
+        by_celltype.setdefault(celltype, {})[stage] = col
+
+    for celltype, stage2col in by_celltype.items():
+        stages = list(stage2col.keys())
+        if len(stages) < 2:
+            continue  # nothing to compare
+
+        # sort stages numerically when possible
+        def _stage_key(s):
+            try:    return float(s)
+            except: return s
+        stages = sorted(stages, key=_stage_key)
+
+        pairs = list(combinations(stages, 2))
+        n = len(pairs)
+        ncols = min(4, max(1, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
+
+        # robust, common axis limits per celltype
+        vals_for_limits = df[[stage2col[s] for s in stages]].to_numpy()
+        upper = np.quantile(vals_for_limits, robust_limit)
+        lims = (0.0, float(upper))
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4.2*ncols, 4.2*nrows), squeeze=False)
+        axes = axes.ravel()
+
+        for ax, (s1, s2) in zip(axes, pairs):
+            x = df[stage2col[s1]].to_numpy()
+            y = df[stage2col[s2]].to_numpy()
+
+            if sample is not None and sample < len(x):
+                idx = np.random.choice(len(x), size=sample, replace=False)
+                x = x[idx]; y = y[idx]
+
+            ax.scatter(x, y, s=2, alpha=0.25, linewidths=0)
+            ax.plot(lims, lims, linestyle="--", linewidth=1)
+            ax.set_xlim(lims); ax.set_ylim(lims)
+            ax.set_xlabel(f"{s1}")
+            ax.set_ylabel(f"{s2}")
+
+            # Pearson r on the (possibly) sampled points
+            if x.size > 1 and y.size > 1:
+                r = np.corrcoef(x, y)[0, 1]
+                ax.text(0.04, 0.96, f"r={r:.2f}", transform=ax.transAxes, va="top")
+
+            ax.set_title(f"{s1} vs {s2}", fontsize=9)
+
+        # turn off any spare axes
+        for ax in axes[len(pairs):]:
+            ax.axis("off")
+
+        fig.suptitle(f"{title_prefix}: {celltype}", y=0.995)
+        fig.tight_layout()
+
+        if save:
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", celltype)
+            out_path = os.path.join(outdir, f"{safe_name}_pairwise_scatter.png")
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved {out_path}")
+
+        if show:
+            plt.show()
+
+        plt.close(fig)
+
+
+
+def quantile_normalize_df(df: pd.DataFrame, axis: int = 0, fillna: str | None = None, out_dtype: str = "float32") -> pd.DataFrame:
+    
+    x = df.to_numpy(dtype=float, copy=True)
+
+    if np.isnan(x).any():
+        if fillna is None:
+            raise ValueError("NaNs found. Use fillna='median' or fillna=0 to proceed.")
+        if fillna == 0:
+            x[np.isnan(x)] = 0.0
+        elif fillna == 'median':
+            if axis == 0:
+                med = np.nanmedian(x, axis=0, keepdims=True)  # per-column median
+                mask = np.isnan(x)
+                x[mask] = np.broadcast_to(med, x.shape)[mask]
+            else:
+                med = np.nanmedian(x, axis=1, keepdims=True)  # per-row median
+                mask = np.isnan(x)
+                x[mask] = np.broadcast_to(med, x.shape)[mask]
+        else:
+            raise ValueError("fillna must be None, 'median', or 0.")
+
+    sorted_x = np.sort(x, axis=axis)
+    meanx = np.mean(sorted_x, axis=axis-1)  # axis-1 -> columns if axis=0, rows if axis=1
+    ranks = np.argsort(np.argsort(x, axis=axis), axis=axis)
+    x_qn = meanx[ranks]                  
+
+    return pd.DataFrame(x_qn, index=df.index, columns=df.columns, dtype=out_dtype)
