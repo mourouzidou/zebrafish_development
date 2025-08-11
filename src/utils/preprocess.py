@@ -11,7 +11,7 @@ from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from scipy.stats import norm
 import os
-
+from pathlib import Path
 
 
 def one_hot_encode(sequence):
@@ -305,6 +305,9 @@ def cpm_normalize_sparse(df, value_col='Accessibility', cell_col='Cell', scale=1
     df['CPM'] = df[value_col] / total_per_cell * scale
     return df
 
+def cpm_normalize_wide(df, scale=1e6):
+    total_per_cell = df.sum(axis=0)
+    return df.div(total_per_cell, axis=1) * scale
 
 def aggregate_atac_to_pseudobulk(
     atac_data_df, 
@@ -992,3 +995,30 @@ def rename_rna_columns_to_pseudobulk(
         renamed_by_stage[stage] = df.rename(columns=mapping)
 
     return renamed_by_stage
+
+
+def convert_counts_csvs_to_parquet(folder=".", modalities=("rna", "atac"), compression="zstd", overwrite=False):
+    folder = Path(folder)
+    for m in modalities:
+        for p in sorted(folder.glob(f"dpf*_{m}_counts.csv")):
+            stage = p.stem.split("_")[0][3:]
+            prefix = f"{stage}.0_"
+            out_pq = p.with_suffix(".parquet")
+            if out_pq.exists() and not overwrite:
+                continue
+            try:
+                df = pd.read_csv(p, index_col=0, engine="pyarrow", memory_map=True)
+            except Exception:
+                df = pd.read_csv(p, index_col=0, engine="c", low_memory=False)
+            df = df.add_prefix(prefix)
+            df.to_parquet(out_pq, engine="pyarrow", compression=compression, index=True)
+
+
+def load_and_stack_data(base_dir="../../data/lifelong/raw"):
+    atac_files = sorted(glob.glob(os.path.join(base_dir, "*_atac_counts.parquet")))
+    rna_files = sorted(glob.glob(os.path.join(base_dir, "*_rna_counts.parquet")))
+    
+    atac_df = pd.concat([pd.read_parquet(f) for f in atac_files], axis=1)
+    rna_df  = pd.concat([pd.read_parquet(f) for f in rna_files], axis=1)
+    
+    return atac_df, rna_df
