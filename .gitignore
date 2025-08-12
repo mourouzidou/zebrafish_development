@@ -2,7 +2,8 @@
 data/*
 !data/embryo/plots/
 !data/embryo/plots/**
-
+!data/lifelong/plots/
+!data/lifelong/plots/**
 src/models/outputs/
 
 # Notebook outputs and checkpoints
