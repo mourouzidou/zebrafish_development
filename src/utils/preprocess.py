@@ -910,6 +910,10 @@ def merge_cluster_metadata(
             by_stage.setdefault(stage, pd.DataFrame(columns=cols))
         return by_stage
 
+def make_unique(series: pd.Series, sep: str = "-") -> pd.Series:
+    """Keep first occurrence as-is, append -1, -2, ... to subsequent duplicates."""
+    k = series.groupby(series).cumcount()
+    return series.where(k.eq(0), series + sep + k.astype(str))
 
 def plot_mean_vs_mean(
     df,
@@ -1071,11 +1075,11 @@ def pseudobulk_aggregate_stream(df, mapping_df, cell_col='atac_cell', name_col='
 
         mean = s / k
         if ddof == 0:
-            var = ss / k - mean**2            # population variance
+            var = ss / k - mean**2            
         else:
             var = (ss - k * mean**2) / max(k - 1, 1)  # sample variance
 
-        var[var < 0] = 0                      # numeric floor
+        var[var < 0] = 0                      
         mean_out[g] = mean.astype(dtype, copy=False)
         std_out[g]  = np.sqrt(var, dtype=np.float64).astype(dtype, copy=False)
         if progress:
@@ -1085,108 +1089,6 @@ def pseudobulk_aggregate_stream(df, mapping_df, cell_col='atac_cell', name_col='
     std_df  = pd.DataFrame(std_out,  index=df.index)
     return mean_df, std_df
 
-
-import os, re, math
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from itertools import combinations
-
-def plot_pairwise_stage_scatter_per_celltype(
-    df: pd.DataFrame,
-    outdir: str = "plots/atac_pairwise",
-    title_prefix: str = "ATAC",
-    sample: int | None = 200_000,       # downsample points per panel (None = all)
-    robust_limit: float = 0.999,         # cap axes at this upper quantile
-    dpi: int = 200,
-    save: bool = True,
-    show: bool = False
-):
-    """
-    df columns must be "<stage>_<celltype>" (e.g., "14_teeth", "60_gill progenitor 1").
-    For each celltype, create a figure with all pairwise stage comparisons (scatter + y=x).
-    Saves one PNG per celltype in `outdir` when save=True, and/or shows figures in the
-    notebook when show=True.
-    """
-    if save:
-        os.makedirs(outdir, exist_ok=True)
-
-    # parse columns -> (stage, celltype)
-    parsed = []
-    for col in df.columns:
-        if "_" in col:
-            stage, celltype = col.split("_", 1)   # first "_" separates stage from celltype
-            parsed.append((stage, celltype, col))
-    if not parsed:
-        raise ValueError("No columns matched the '<stage>_<celltype>' pattern.")
-
-    # group columns by celltype
-    by_celltype: dict[str, dict[str, str]] = {}
-    for stage, celltype, col in parsed:
-        by_celltype.setdefault(celltype, {})[stage] = col
-
-    for celltype, stage2col in by_celltype.items():
-        stages = list(stage2col.keys())
-        if len(stages) < 2:
-            continue  # nothing to compare
-
-        # sort stages numerically when possible
-        def _stage_key(s):
-            try:    return float(s)
-            except: return s
-        stages = sorted(stages, key=_stage_key)
-
-        pairs = list(combinations(stages, 2))
-        n = len(pairs)
-        ncols = min(4, max(1, math.ceil(math.sqrt(n))))
-        nrows = math.ceil(n / ncols)
-
-        # robust, common axis limits per celltype
-        vals_for_limits = df[[stage2col[s] for s in stages]].to_numpy()
-        upper = np.quantile(vals_for_limits, robust_limit)
-        lims = (0.0, float(upper))
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(4.2*ncols, 4.2*nrows), squeeze=False)
-        axes = axes.ravel()
-
-        for ax, (s1, s2) in zip(axes, pairs):
-            x = df[stage2col[s1]].to_numpy()
-            y = df[stage2col[s2]].to_numpy()
-
-            if sample is not None and sample < len(x):
-                idx = np.random.choice(len(x), size=sample, replace=False)
-                x = x[idx]; y = y[idx]
-
-            ax.scatter(x, y, s=2, alpha=0.25, linewidths=0)
-            ax.plot(lims, lims, linestyle="--", linewidth=1)
-            ax.set_xlim(lims); ax.set_ylim(lims)
-            ax.set_xlabel(f"{s1}")
-            ax.set_ylabel(f"{s2}")
-
-            # Pearson r on the (possibly) sampled points
-            if x.size > 1 and y.size > 1:
-                r = np.corrcoef(x, y)[0, 1]
-                ax.text(0.04, 0.96, f"r={r:.2f}", transform=ax.transAxes, va="top")
-
-            ax.set_title(f"{s1} vs {s2}", fontsize=9)
-
-        # turn off any spare axes
-        for ax in axes[len(pairs):]:
-            ax.axis("off")
-
-        fig.suptitle(f"{title_prefix}: {celltype}", y=0.995)
-        fig.tight_layout()
-
-        if save:
-            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", celltype)
-            out_path = os.path.join(outdir, f"{safe_name}_pairwise_scatter.png")
-            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-            print(f"Saved {out_path}")
-
-        if show:
-            plt.show()
-
-        plt.close(fig)
 
 
 
@@ -1217,3 +1119,175 @@ def quantile_normalize_df(df: pd.DataFrame, axis: int = 0, fillna: str | None = 
     x_qn = meanx[ranks]                  
 
     return pd.DataFrame(x_qn, index=df.index, columns=df.columns, dtype=out_dtype)
+
+
+
+
+
+# ------------ parsing peak ids ------------
+
+def add_coords_from_index(df, index_name="peak_id"):
+    out = df.copy()
+
+    # Detect where to pull the peak IDs from
+    if "Peak" in out.columns:
+        peak_series = out["Peak"].astype(str)
+    else:
+        if out.index.name is None:
+            out.index.name = index_name
+        peak_series = out.index.to_series().astype(str)
+
+    # Try pattern with colon first (chr:start-end)
+    m = peak_series.str.extract(
+        r'^(?P<chromosome>chr[^:]+):(?P<start>\d+)-(?P<end>\d+)$'
+    )
+
+    # If no match (old format chr-start-end), fall back
+    if m["start"].isna().any():
+        m = peak_series.str.extract(
+            r'^(?P<chromosome>chr[^-]+)-(?P<start>\d+)-(?P<end>\d+)$'
+        )
+
+    out["chromosome"] = m["chromosome"]
+    out["start"] = m["start"].astype(float).astype("Int64")
+    out["end"] = m["end"].astype(float).astype("Int64")
+
+    return out
+
+# ------------ naming ------------
+def short_name(module: str,
+               length: int,
+               assembly: str,
+               counts: str,
+               log: bool,
+               quant: bool,
+               dataset: str):
+    """
+    Example -> train_atac_L2k_g11_life_raw_l1_q0.parquet
+                train_atac_L2k_g11_emb_cpm_l0_q1.npy
+    """
+    lflag = "l1" if log else "l0"
+    qflag = "q1" if quant else "q0"
+    asm = "g11" if assembly.upper().startswith("GRCZ11") else assembly.lower()
+    dtag = {"lifelong":"life", "embryo":"emb"}.get(dataset.lower(), dataset.lower())
+    return f"train_{module}_L{length//1000}k_{asm}_{dtag}_{counts}_{lflag}_{qflag}"
+
+
+# ------------ sequence extraction ------------
+
+def extract_sequences_once(base_df: pd.DataFrame,
+                           fasta_dir: str,
+                           expansion_length: int,
+                           save_dir: str,
+                           assembly: str = "GRCz11",
+                           coords_tag: str = "coords") -> pd.DataFrame:
+    """
+    Parse coords from base_df.index, extract sequences once, save a coords-only file,
+    and return a DataFrame indexed by peak_id with [chromosome, start, end, sequence].
+    """
+    
+
+    coords = add_coords_from_index(base_df)[["chromosome", "start", "end"]].copy()
+    coords.index.name = "peak_id"
+    coords_reset = coords.reset_index()
+
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    df_name = f"{coords_tag}_{assembly}_L{expansion_length//1000}k"
+    seqs_df = extract_centered_sequences(
+        df=coords_reset,
+        fasta_dir=fasta_dir,
+        expansion_length=expansion_length,
+        save_dir=save_dir,
+        df_name=df_name,  # will write a small CSV (coords+sequence)
+    )
+    seqs_df = seqs_df.set_index("peak_id")[["chromosome", "start", "end", "sequence"]]
+    return seqs_df
+
+# ------------ attach & save ------------
+
+def attach_sequences_to_matrix(mat: pd.DataFrame, seqs_df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join sequence/coords onto the expression/accessibility matrix."""
+    if mat.index.name is None:
+        mat.index.name = "peak_id"
+    return mat.join(seqs_df, how="left")
+
+def save_dataset(df: pd.DataFrame, outdir: str, basename: str,
+                 save_csv: bool = False) :
+    """Save Parquet (default) and optional CSV. Returns (parquet_path, csv_path|None)."""
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+    pq = outdir / f"{basename}.parquet"
+    df.to_parquet(pq, index=True)
+    csv_path = None
+    if save_csv:
+        csv_path = outdir / f"{basename}.csv"
+        df.to_csv(csv_path)
+    return pq, csv_path
+
+# ------------ orchestrator ------------
+def process_atac_datasets(datasets: dict,
+                          fasta_dir: str,
+                          save_dir: str,
+                          expansion_length: int = 2000,
+                          assembly: str = "GRCz11",
+                          module: str = "atac",
+                          dataset: str = "lifelong",
+                          save_csv: bool = False):
+    # 1) sequences once
+    any_key = next(iter(datasets))
+    base_df = datasets[any_key]["df"]
+    seqs_df = extract_sequences_once(
+        base_df=base_df,
+        fasta_dir=fasta_dir,
+        expansion_length=expansion_length,
+        save_dir=save_dir,
+        assembly=assembly,
+        coords_tag=f"coords_only_{dataset}",
+    )
+
+    # 2) attach + save
+    manifest_rows = []
+    for label, meta in datasets.items():
+        df_mat = meta["df"]
+        df_out = attach_sequences_to_matrix(df_mat, seqs_df)
+
+        base = short_name(module, expansion_length, assembly,
+                          meta["counts"], meta["log"], meta["quant"],
+                          dataset=dataset)
+
+        parquet_path = Path(save_dir) / f"{base}__seqs.parquet"
+        df_out.to_parquet(parquet_path, index=True)
+
+        # optional one-hot NPY (if you’re using it here)
+        # npy_path = save_one_hot_npy(df_out["sequence"], save_dir, base, dtype=np.float16)
+
+        manifest_rows.append({
+            "label": label,
+            "basename": base,
+            "parquet": str(parquet_path),
+            # "npy_onehot": str(npy_path) if npy_path else "",
+            "assembly": assembly,
+            "dataset": dataset,
+            "length_bp": expansion_length,
+            "counts": meta["counts"],
+            "log": meta["log"],
+            "quant": meta["quant"],
+            "rows": df_out.shape[0],
+            "cols": df_out.shape[1],
+        })
+
+    manifest = pd.DataFrame(manifest_rows).sort_values(["dataset","basename"])
+    manifest_path = Path(save_dir) / f"manifest_{module}_{dataset}_L{expansion_length//1000}k.csv"
+    manifest.to_csv(manifest_path, index=False)
+    return manifest
+
+    
+
+def save_one_hot_npy(sequences, out_dir, basename, dtype=np.float16):
+    """
+    sequences: list/Series of strings, equal length.
+    Saves an N x L x 4 one-hot encoded array to a single .npy file.
+    """
+    arr = one_hot_batch(list(sequences), dtype=dtype)  # use your batch encoder
+    out_path = Path(out_dir) / f"{basename}__onehot.npy"
+    np.save(out_path, arr)
+    return out_path

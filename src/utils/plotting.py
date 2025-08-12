@@ -629,7 +629,7 @@ def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path
         plt.close()
 
 
-def plot_reads_per_cell_by_celltype_and_stage(
+def plot_reads_per_cell_by_celltype_and_stage_lifelong(
     df,
     count_col,
     min_cells_per_group=10,
