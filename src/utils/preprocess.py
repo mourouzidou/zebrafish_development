@@ -1163,13 +1163,14 @@ def short_name(module: str,
                quant: bool,
                dataset: str):
     """
-    Example -> train_atac_L2k_g11_life_raw_l1_q0.parquet
-                train_atac_L2k_g11_emb_cpm_l0_q1.npy
+    Compact basename with dataset tag taken directly from `dataset`.
+    Example: train_atac_L2k_g11_embryo2_raw_l1_q0
     """
     lflag = "l1" if log else "l0"
     qflag = "q1" if quant else "q0"
     asm = "g11" if assembly.upper().startswith("GRCZ11") else assembly.lower()
-    dtag = {"lifelong":"life", "embryo":"emb"}.get(dataset.lower(), dataset.lower())
+    # Make dataset safe for filenames
+    dtag = dataset.lower().replace(" ", "_")
     return f"train_{module}_L{length//1000}k_{asm}_{dtag}_{counts}_{lflag}_{qflag}"
 
 
@@ -1230,9 +1231,13 @@ def process_atac_datasets(datasets: dict,
                           expansion_length: int = 2000,
                           assembly: str = "GRCz11",
                           module: str = "atac",
-                          dataset: str = "lifelong",
+                          dataset: str = "",
                           save_csv: bool = False):
-    # 1) sequences once
+    """
+    datasets: dict of {label: {df: DataFrame, counts: str, log: bool, quant: bool}}
+    dataset: string tag for dataset (e.g., 'lifelong', 'embryo2')
+    """
+    # 1) Extract sequences once
     any_key = next(iter(datasets))
     base_df = datasets[any_key]["df"]
     seqs_df = extract_sequences_once(
@@ -1244,7 +1249,7 @@ def process_atac_datasets(datasets: dict,
         coords_tag=f"coords_only_{dataset}",
     )
 
-    # 2) attach + save
+    # 2) Attach + save each dataset version
     manifest_rows = []
     for label, meta in datasets.items():
         df_mat = meta["df"]
@@ -1257,16 +1262,12 @@ def process_atac_datasets(datasets: dict,
         parquet_path = Path(save_dir) / f"{base}__seqs.parquet"
         df_out.to_parquet(parquet_path, index=True)
 
-        # optional one-hot NPY (if you’re using it here)
-        # npy_path = save_one_hot_npy(df_out["sequence"], save_dir, base, dtype=np.float16)
-
         manifest_rows.append({
+            "dataset": dataset,
             "label": label,
             "basename": base,
             "parquet": str(parquet_path),
-            # "npy_onehot": str(npy_path) if npy_path else "",
             "assembly": assembly,
-            "dataset": dataset,
             "length_bp": expansion_length,
             "counts": meta["counts"],
             "log": meta["log"],
@@ -1275,7 +1276,8 @@ def process_atac_datasets(datasets: dict,
             "cols": df_out.shape[1],
         })
 
-    manifest = pd.DataFrame(manifest_rows).sort_values(["dataset","basename"])
+    # 3) Save manifest
+    manifest = pd.DataFrame(manifest_rows).sort_values(["dataset", "basename"])
     manifest_path = Path(save_dir) / f"manifest_{module}_{dataset}_L{expansion_length//1000}k.csv"
     manifest.to_csv(manifest_path, index=False)
     return manifest
