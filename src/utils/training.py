@@ -82,3 +82,148 @@ def train_model(
                 break
 
     return train_losses, val_losses, val_corrs_seq, val_corrs_type
+
+
+
+def choose_holdout_chroms(chroms: np.ndarray, test_size: float,
+                          seed: int = 42) -> List[str]:
+    """
+    Pick a deterministic set of chromosomes whose row count sums to ~test_size of total.
+    Returns a list of chromosome labels (as strings).
+    """
+    uniq, counts = np.unique(chroms, return_counts=True)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(uniq))
+    total = len(chroms)
+    chosen, acc = [], 0
+    for i in order:
+        chosen.append(str(uniq[i]))
+        acc += counts[i]
+        if acc / total >= test_size:
+            break
+    return chosen
+
+
+def prepare_training_from_df(
+    df: pl.DataFrame,
+    pattern: str,
+    output_dir: str | Path = "../../data/training/",
+    test_size: float = 0.2,
+    random_state: int = 42,
+    channel_first: bool = True,
+    split_mode: str = "random",                 # "random" | "chromosome"
+    holdout_chroms: Optional[List[str]] = None  # used when split_mode="chromosome"
+) -> Path:
+    """
+    From a merged Polars DataFrame (embryo2life), produce X/Y numpy arrays and metadata.
+
+    - Targets = all numeric non-metadata columns.
+    - Inputs  = one-hot encodings of 'sequence'.
+    - Splitting:
+        * random: standard random split by rows.
+        * chromosome: hold out all rows from selected chromosomes (no leakage).
+          If holdout_chroms is None, chromosomes are auto-selected to cover ~test_size.
+
+    Folder layout:
+        output_dir/
+          <base_name>/
+            <trainpct>_<testpct>_<mode>/
+              X_train.npy, Y_train.npy, X_test.npy, Y_test.npy,
+              target_columns.txt, meta.json
+
+    Returns:
+        Path to the split subfolder.
+    """
+    if "sequence" not in df.columns:
+        raise ValueError("Input DataFrame must contain a 'sequence' column.")
+    base_name = pattern.replace("DATASET", "merged")
+    root = _build_output_root(base_name, output_dir, test_size, split_mode)
+
+    # Determine targets and arrays
+    targets = target_cols_from_schema(df.schema, exclude=META_COLS)
+    if not targets:
+        raise ValueError("No numeric target columns found.")
+    seqs = df.get_column("sequence").to_list()
+    Y = df.select(targets).to_numpy().astype(np.float32)
+
+    N = len(seqs)
+    rng = np.random.default_rng(random_state)
+
+    # Split indices
+    if split_mode == "chromosome":
+        if "chromosome" not in df.columns:
+            raise ValueError("split_mode='chromosome' requires a 'chromosome' column.")
+        chroms = df.get_column("chromosome").to_numpy()
+        if holdout_chroms is None:
+            holdout_chroms = choose_holdout_chroms(chroms, test_size, random_state)
+        test_mask = np.isin(chroms, holdout_chroms)
+        train_mask = ~test_mask
+        train_idx = np.nonzero(train_mask)[0]
+        test_idx = np.nonzero(test_mask)[0]
+
+        # If under target size, top-up randomly from remaining train rows
+        need = int(round(test_size * N)) - len(test_idx)
+        if need > 0 and len(train_idx) > 0:
+            extra = rng.choice(train_idx, size=min(need, len(train_idx)), replace=False)
+            test_idx = np.sort(np.concatenate([test_idx, extra]))
+            train_idx = np.array(sorted(set(train_idx) - set(extra)))
+    else:
+        perm = rng.permutation(N)
+        n_test = int(round(test_size * N))
+        test_idx, train_idx = np.sort(perm[:n_test]), np.sort(perm[n_test:])
+
+    # Slice & encode
+    seq_train = [seqs[i] for i in train_idx]
+    seq_test = [seqs[i] for i in test_idx]
+    Y_train, Y_test = Y[train_idx], Y[test_idx]
+
+    X_train = one_hot_batch(seqs=seq_train, channel_first=channel_first)
+    X_test = one_hot_batch(seqs=seq_test, channel_first=channel_first)
+
+    # Save arrays
+    np.save(root / "X_train.npy", X_train)
+    np.save(root / "Y_train.npy", Y_train)
+    np.save(root / "X_test.npy", X_test)
+    np.save(root / "Y_test.npy", Y_test)
+
+    # Save targets & meta
+    (root / "target_columns.txt").write_text("\n".join(targets))
+    meta = {
+        "base_name": base_name,
+        "N": int(N),
+        "seq_len": int(X_train.shape[2] if channel_first else X_train.shape[1]),
+        "n_targets": int(len(targets)),
+        "split_mode": split_mode,
+        "holdout_chromosomes": [str(c) for c in (holdout_chroms or [])]
+            if split_mode == "chromosome" else None,
+        "train_size": int(X_train.shape[0]),
+        "test_size": int(X_test.shape[0]),
+        "train_pct": int(round((1 - test_size) * 100)),
+        "test_pct": int(round(test_size * 100)),
+        "channel_first": bool(channel_first),
+        "targets": targets,
+        "random_state": int(random_state),
+    }
+    with open(root / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2, default=_json_default)
+
+    return root
+
+
+def load_split_folder(split_dir: str | Path) -> dict[str, np.ndarray | list[str] | dict]:
+    """
+    Convenience loader for a produced split folder.
+    Returns a dict with arrays and metadata.
+    """
+    split_dir = Path(split_dir)
+    X_train = np.load(split_dir / "X_train.npy", mmap_mode=None)
+    Y_train = np.load(split_dir / "Y_train.npy", mmap_mode=None)
+    X_test = np.load(split_dir / "X_test.npy", mmap_mode=None)
+    Y_test = np.load(split_dir / "Y_test.npy", mmap_mode=None)
+    targets = (split_dir / "target_columns.txt").read_text().strip().splitlines()
+    meta = json.loads((split_dir / "meta.json").read_text())
+    return {
+        "X_train": X_train, "Y_train": Y_train,
+        "X_test": X_test, "Y_test": Y_test,
+        "targets": targets, "meta": meta,
+    }

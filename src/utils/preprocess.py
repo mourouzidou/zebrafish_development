@@ -15,6 +15,10 @@ from pathlib import Path
 import glob
 import os, re, math
 from itertools import combinations
+import json
+from __future__ import annotations
+from typing import Iterable, List, Optional, Tuple
+
 
 
 def one_hot_encode(sequence):
@@ -1293,3 +1297,136 @@ def save_one_hot_npy(sequences, out_dir, basename, dtype=np.float16):
     out_path = Path(out_dir) / f"{basename}__onehot.npy"
     np.save(out_path, arr)
     return out_path
+
+
+# ------------ MERGED EMBRYO AND LIFELONG DATASETS ------------
+def extract_file_params(filepath):
+    """Extract parameters from filename for matching"""
+    filename = filepath.stem
+    # Replace lifelong or embryo with placeholder to match files
+    normalized = re.sub(r'(lifelong|embryo)', 'DATASET', filename)
+    return normalized
+
+def merge_embryo_lifelong_files(lifelong_dir, embryo_dir):
+    """
+    Merge embryo and lifelong parquet files with matching parameters.
+    Stack both horizontally (columns) and vertically (rows).
+    """
+    lifelong_dir = Path(lifelong_dir)
+    embryo_dir = Path(embryo_dir)
+    
+    lifelong_files = sorted(lifelong_dir.glob("*.parquet"))
+    embryo_files = sorted(embryo_dir.glob("*.parquet"))
+    
+    lifelong_map = {}
+    embryo_map = {}
+    
+    for file in lifelong_files:
+        normalized = extract_file_params(file)
+        lifelong_map[normalized] = file
+    
+    for file in embryo_files:
+        normalized = extract_file_params(file)
+        embryo_map[normalized] = file
+    
+    # Find matching pairs
+    common_patterns = set(lifelong_map.keys()) & set(embryo_map.keys())
+    print(f"Found {len(common_patterns)} matching file pairs")
+    
+    merged_dataframes = {}
+    
+    for pattern in common_patterns:
+        lifelong_file = lifelong_map[pattern]
+        embryo_file = embryo_map[pattern]
+        
+        try:
+            df_lifelong = pl.read_parquet(lifelong_file)
+            df_embryo = pl.read_parquet(embryo_file)
+            
+            lifelong_cols = set(df_lifelong.columns)
+            embryo_cols = set(df_embryo.columns)
+            all_cols = sorted(lifelong_cols | embryo_cols)
+            lifelong_schema = df_lifelong.schema
+            embryo_schema = df_embryo.schema
+            
+            for col in all_cols:
+                if col not in lifelong_cols:
+                    # Use the type from embryo schema if available, otherwise Float64
+                    target_type = embryo_schema.get(col, pl.Float64)
+                    df_lifelong = df_lifelong.with_columns(
+                        pl.lit(0).cast(target_type).alias(col)
+                    )
+                if col not in embryo_cols:
+                    # Use the type from lifelong schema if available, otherwise Float64
+                    target_type = lifelong_schema.get(col, pl.Float64)
+                    df_embryo = df_embryo.with_columns(
+                        pl.lit(0).cast(target_type).alias(col)
+                    )
+            
+            final_schema = {}
+            for col in all_cols:
+                embryo_type = df_embryo.schema[col]
+                lifelong_type = df_lifelong.schema[col]
+                
+                # If types are different, cast both to Float64 for safety
+                if embryo_type != lifelong_type:
+                    print(f"    Type mismatch for {col}: embryo={embryo_type}, lifelong={lifelong_type}, using Float64")
+                    final_schema[col] = pl.Float64
+                else:
+                    final_schema[col] = embryo_type
+            
+            # Cast columns to final schema
+            for col, dtype in final_schema.items():
+                if df_embryo.schema[col] != dtype:
+                    df_embryo = df_embryo.with_columns(pl.col(col).cast(dtype))
+                if df_lifelong.schema[col] != dtype:
+                    df_lifelong = df_lifelong.with_columns(pl.col(col).cast(dtype))
+            
+            df_lifelong = df_lifelong.select(all_cols)
+            df_embryo = df_embryo.select(all_cols)
+            
+            df_lifelong = df_lifelong.with_columns(pl.lit("lifelong").alias("dataset"))
+            df_embryo = df_embryo.with_columns(pl.lit("embryo").alias("dataset"))
+            
+            merged_df = pl.concat([df_embryo, df_lifelong], how="vertical")
+            
+            merged_dataframes[pattern] = merged_df
+            
+        except Exception as e:
+            print(f"  Error processing {pattern}: {str(e)}")
+            continue
+    
+    return merged_dataframes
+
+
+
+def _is_numeric(dt: pl.DataType) -> bool:
+    """Return True if a Polars dtype is integer or float (works across Polars versions)."""
+    return any(isinstance(dt, t) for t in (
+        pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+        pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+        pl.Float32, pl.Float64
+    ))
+
+def target_cols_from_schema(schema: dict[str, pl.DataType],
+                            exclude: Iterable[str] = META_COLS) -> List[str]:
+    """All numeric columns except metadata columns."""
+    excl = set(exclude)
+    return [c for c, dt in schema.items() if c not in excl and _is_numeric(dt)]
+
+def _json_default(obj):
+    """Make numpy/polars scalars JSON-serializable for json.dump(default=_json_default)."""
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return str(obj)
+
+def _build_output_root(base_name: str, output_dir: str | Path,
+                       test_size: float, split_mode: str) -> Path:
+    train_pct = int(round((1 - test_size) * 100))
+    test_pct = int(round(test_size * 100))
+    mode_lbl = "chrom_split" if split_mode == "chromosome" else "random"
+    root = Path(output_dir) / base_name / f"{train_pct}_{test_pct}_{mode_lbl}"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
