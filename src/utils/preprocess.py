@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt 
@@ -16,9 +17,12 @@ import glob
 import os, re, math
 from itertools import combinations
 import json
-from __future__ import annotations
 from typing import Iterable, List, Optional, Tuple
 
+
+META_COLS: set[str] = {
+    "peak_id", "Peak", "chromosome", "end", "start", "sequence", "dataset"
+}
 
 
 def one_hot_encode(sequence):
@@ -191,21 +195,20 @@ def preprocess_data(csv_path, sequence_length=2000, drop_n_last_cols=5, scale=0,
 
     return df_raw, df_quant
     
+    
 
 def plot_distributions(
-    df_raw, df_quant, title_prefix="Data", cell_type_filter=None, pseudobulk_counts=None, save_dir=None):
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+    df_raw, df_quant, dataset_name, title_prefix="Data", transformation = 'log', cell_type_filter=None, 
+    pseudobulk_counts=None, save_dir=None, show=True):
+    
     cols = list(df_raw.columns)
-
     if pseudobulk_counts is not None:
         cols_sorted = sorted(cols, key=lambda x: -pseudobulk_counts.get(x, 0))
     else:
-        cols_sorted = cols  
-
-    # Cell type for each column (for coloring)
+        cols_sorted = cols
+    
     cell_types = [col.split('_')[1] if len(col.split('_')) > 1 else col for col in cols_sorted]
-
+    
     # Filter if specified
     if cell_type_filter is not None:
         filtered_indices = [i for i, ct in enumerate(cell_types) if ct in cell_type_filter]
@@ -214,33 +217,36 @@ def plot_distributions(
     else:
         cols_filtered = cols_sorted
         cell_types_filtered = cell_types
-
+    
     unique_cell_types = list(dict.fromkeys(cell_types_filtered))
     palette = dict(zip(unique_cell_types, sns.color_palette("tab20c", len(unique_cell_types))))
     box_colors = [palette[ct] for ct in cell_types_filtered]
-
+    
     if pseudobulk_counts is not None:
         x_labels = [f"{col}\n(n={pseudobulk_counts.get(col, 0)})" for col in cols_filtered]
     else:
         x_labels = cols_filtered
-
+    
     def _plot(df, subtitle, use_single_color=False, fname=None):
         plt.figure(figsize=(32, 12))
         if use_single_color:
             ax = sns.boxplot(data=df[cols_filtered], color='lightgray')
         else:
             ax = sns.boxplot(data=df[cols_filtered], palette=box_colors)
-        ax.set_title(f"{title_prefix}: {subtitle}")
+        ax.set_title(f"{dataset_name}: {title_prefix}: {subtitle}", fontsize=16)
         ax.set_xlabel("Pseudobulk")
-        ax.set_ylabel("log2(Accessibility + 1)")
+        ax.set_ylabel("Accessibility {transformation}")
         ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=6)
         plt.tight_layout()
+        
         if fname:
             plt.savefig(fname, dpi=150)
-            plt.close()
-        else:
+        
+        if show:
             plt.show()
-
+        else:
+            plt.close()
+    
     if save_dir:
         import os
         prefix = title_prefix.lower().replace(" ", "_")
@@ -248,9 +254,11 @@ def plot_distributions(
         fname_quant = f"{save_dir}/{prefix}_quantile_log2_boxplot.png"
     else:
         fname_raw = fname_quant = None
-
+    
     _plot(df_raw, "Raw", use_single_color=False, fname=fname_raw)
     _plot(df_quant, "Quantile Normalized", use_single_color=True, fname=fname_quant)
+
+
 
 
 from Bio import SeqIO
@@ -1430,3 +1438,21 @@ def _build_output_root(base_name: str, output_dir: str | Path,
     root = Path(output_dir) / base_name / f"{train_pct}_{test_pct}_{mode_lbl}"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def one_hot_batch(seqs: List[str], channel_first: bool = True) -> np.ndarray:
+    """
+    Encode a list of sequences into a tensor.
+    Returns (N, 4, L) if channel_first else (N, L, 4). dtype float32.
+    """
+    if not seqs:
+        raise ValueError("Empty sequence list.")
+    L = len(seqs[0])
+    X = np.empty((len(seqs), L, 4), dtype=np.float32)
+    for i, s in enumerate(seqs):
+        if len(s) != L:
+            raise ValueError("All sequences must have identical length.")
+        X[i] = one_hot_encode(s)
+    return np.transpose(X, (0, 2, 1)) if channel_first else X
+
+

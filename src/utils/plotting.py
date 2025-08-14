@@ -592,7 +592,8 @@ def plot_distance_distributions_by_celltype(cell_to_psd_with_markers,
 
 
 
-def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path=None, show=True):
+
+def plot_pseudobulk_distributions(df, count_col, dataset_name, max_pseudobulks=None, save_path=None, show=True):
     cell_counts = df['pseudobulk'].value_counts()
     order = cell_counts.index.tolist()
     
@@ -614,10 +615,10 @@ def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path
         palette='tab20'
     )
     
-    ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=6, linespacing=1.7)
-    plt.xlabel("Pseudobulk (sorted by #cells)", fontsize=12, fontweight='bold')
-    plt.ylabel(f"{count_col} per Cell", fontsize=12)
-    plt.title(f"{count_col} per Cell by Pseudobulk and Annotation", fontsize=12)
+    ax.set_xticklabels(x_labels, rotation=65, ha='right', fontsize=6, linespacing=1.7)
+    plt.xlabel("Pseudobulk (sorted by #cells)", fontsize=14, fontweight='bold')
+    plt.ylabel(f"{count_col} per Cell", fontsize=16)
+    plt.title(f"{dataset_name}:  {count_col} per Cell by Pseudobulk", fontsize=20)
     plt.legend(title="Annotation", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=6)
     plt.tight_layout()
     
@@ -627,7 +628,6 @@ def plot_pseudobulk_distributions(df, count_col, max_pseudobulks=None, save_path
         plt.show()
     else:
         plt.close()
-
 
 def plot_reads_per_cell_by_celltype_and_stage_lifelong(
     df,
@@ -876,3 +876,342 @@ def plot_mean_vs_std_by_celltype_and_stage(
     plt.subplots_adjust(top=0.9)
     plt.show()
 
+import os, re, math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from itertools import combinations
+
+# --- small helpers for smoothed 2D hist contours ---
+def _gaussian_kernel1d(sigma: float, radius: int | None = None):
+    if sigma <= 0:
+        return np.array([1.0], dtype=float)
+    if radius is None:
+        radius = max(1, int(3 * sigma))
+    x = np.arange(-radius, radius + 1)
+    k = np.exp(-0.5 * (x / sigma) ** 2)
+    k /= k.sum()
+    return k
+
+def _gaussian_smooth2d(arr: np.ndarray, sigma: float = 1.0):
+    if sigma <= 0:
+        return arr
+    k = _gaussian_kernel1d(sigma)
+    tmp = np.apply_along_axis(lambda v: np.convolve(v, k, mode="same"), axis=1, arr=arr)
+    out = np.apply_along_axis(lambda v: np.convolve(v, k, mode="same"), axis=0, arr=tmp)
+    return out
+# ---------------------------------------------------
+
+def plot_pairwise_stage_scatter_per_celltype(
+    df: pd.DataFrame,
+    outdir: str = "plots/atac_pairwise",
+    title_prefix: str = "ATAC",
+    sample: int | None = 200_000,       # downsample points per panel (None = all)
+    robust_limit: float = 0.999,         # cap axes at this upper quantile (common per celltype)
+    dpi: int = 200,
+    save: bool = True,
+    show: bool = False,
+    *,
+    label: str = "",                     # e.g. "Quantile normalized"
+    filename_prefix: str = "",           # e.g. "qn_"
+    subdir: str | None = None,           # e.g. "quantile_normalized"
+    # density controls
+    density: bool = True,
+    density_method: str = "hist",        # "hist" (smoothed 2D hist) or "kde"
+    density_bins: int = 80,              # for "hist": number of bins per axis
+    density_sigma: float = 2.0,          # for "hist": Gaussian smooth (in bins)
+    density_levels: tuple[float, ...] | None = (0.60, 0.80, 0.90, 0.97),  # quantiles of density
+    kde_bandwidth: float = 0.25,         # for "kde": Gaussian bandwidth (in data units)
+    kde_grid: int = 200                  # for "kde": grid resolution per axis
+):
+    """
+    df columns must be "<stage>_<celltype>" (e.g., "14_teeth", "60_gill progenitor 1").
+    For each celltype, create a figure with all pairwise stage comparisons (scatter + y=x).
+    Subplots are ordered by descending |stage2 - stage1|.
+    Optional density contours via smoothed 2D histogram or KDE.
+    """
+    # Resolve output directory
+    save_dir = os.path.join(outdir, subdir) if (save and subdir) else outdir
+    if save:
+        os.makedirs(save_dir, exist_ok=True)
+
+    # parse columns -> (stage, celltype)
+    parsed = []
+    for col in df.columns:
+        if "_" in col:
+            stage, celltype = col.split("_", 1)   # first "_" separates stage from celltype
+            parsed.append((stage, celltype, col))
+    if not parsed:
+        raise ValueError("No columns matched the '<stage>_<celltype>' pattern.")
+
+    # group columns by celltype
+    by_celltype: dict[str, dict[str, str]] = {}
+    for stage, celltype, col in parsed:
+        by_celltype.setdefault(celltype, {})[stage] = col
+
+    # label pieces
+    label_clean = label.strip()
+    label_for_title = f" — {label_clean}" if label_clean else ""
+    label_for_file  = ("_" + re.sub(r"[^A-Za-z0-9._-]+", "_", label_clean)) if label_clean else ""
+
+    # helpers
+    def _stage_key(s):
+        try:    return float(s)
+        except: return s
+
+    def _pair_distance(p):
+        a, b = p
+        try:
+            return abs(float(a) - float(b))
+        except:
+            return -1.0  # non-numeric stages go last
+
+    for celltype, stage2col in by_celltype.items():
+        stages = list(stage2col.keys())
+        if len(stages) < 2:
+            continue  # nothing to compare
+
+        stages = sorted(stages, key=_stage_key)
+        pairs = sorted(combinations(stages, 2), key=_pair_distance, reverse=True)
+
+        # robust, common axis limits per celltype
+        vals = df[[stage2col[s] for s in stages]].to_numpy()
+        upper = np.quantile(vals, robust_limit)
+        lower = 0.0  # log2(CPM+1) should be >= 0
+        lims = (float(lower), float(upper))
+
+        n = len(pairs)
+        ncols = min(4, max(1, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4.4*ncols, 4.2*nrows), squeeze=False)
+        axes = axes.ravel()
+
+        for ax, (s1, s2) in zip(axes, pairs):
+            x = df[stage2col[s1]].to_numpy()
+            y = df[stage2col[s2]].to_numpy()
+
+            if sample is not None and sample < len(x):
+                idx = np.random.choice(len(x), size=sample, replace=False)
+                x = x[idx]; y = y[idx]
+
+            # scatter
+            ax.scatter(x, y, s=2, alpha=0.25, linewidths=0)
+
+            # y = x reference
+            ax.plot(lims, lims, linestyle="--", linewidth=1.2, color="red")
+
+            # --- density overlay ---
+            if density:
+                if density_method == "hist":
+                    H, xedges, yedges = np.histogram2d(x, y, bins=density_bins, range=[lims, lims])
+                    H = _gaussian_smooth2d(H, sigma=density_sigma)
+                    pos = H[H > 0]
+                    levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                    if levels:
+                        X = 0.5 * (xedges[:-1] + xedges[1:])
+                        Y = 0.5 * (yedges[:-1] + yedges[1:])
+                        ax.contour(X, Y, H.T, levels=levels, linewidths=1.0, colors="black")
+                elif density_method == "kde":
+                    try:
+                        from sklearn.neighbors import KernelDensity
+                        gx = np.linspace(lims[0], lims[1], kde_grid)
+                        gy = np.linspace(lims[0], lims[1], kde_grid)
+                        XX, YY = np.meshgrid(gx, gy)
+                        grid = np.c_[XX.ravel(), YY.ravel()]
+                        kde = KernelDensity(bandwidth=kde_bandwidth, kernel="gaussian").fit(np.c_[x, y])
+                        ZZ = np.exp(kde.score_samples(grid)).reshape(XX.shape)
+                        pos = ZZ[ZZ > 0]
+                        levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                        if levels:
+                            ax.contour(XX, YY, ZZ, levels=levels, linewidths=1.0, colors="black")
+                    except Exception as e:
+                        # fallback to histogram if sklearn not available or KDE fails
+                        H, xedges, yedges = np.histogram2d(x, y, bins=density_bins, range=[lims, lims])
+                        H = _gaussian_smooth2d(H, sigma=density_sigma)
+                        pos = H[H > 0]
+                        levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                        if levels:
+                            X = 0.5 * (xedges[:-1] + xedges[1:])
+                            Y = 0.5 * (yedges[:-1] + yedges[1:])
+                            ax.contour(X, Y, H.T, levels=levels, linewidths=1.0, colors="black")
+            # -----------------------
+
+            ax.set_xlim(lims); ax.set_ylim(lims)
+            ax.set_xlabel(f"{s1}")
+            ax.set_ylabel(f"{s2}")
+
+            if x.size > 1 and y.size > 1:
+                r = np.corrcoef(x, y)[0, 1]
+                ax.text(0.04, 0.96, f"r={r:.2f}", transform=ax.transAxes, va="top")
+
+            ax.set_title(f"{s1} vs {s2}", fontsize=9)
+
+        # turn off extra axes
+        for ax in axes[len(pairs):]:
+            ax.axis("off")
+
+        fig.suptitle(f"{title_prefix}: {celltype}{label_for_title}", y=0.995)
+        fig.tight_layout()
+
+        if save:
+            safe_cell = re.sub(r"[^A-Za-z0-9._-]+", "_", celltype)
+            fname = f"{filename_prefix}{safe_cell}{label_for_file}_pairwise_scatter.png"
+            out_path = os.path.join(save_dir, fname)
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved {out_path}")
+
+        if show:
+            plt.show()
+
+        plt.close(fig)
+
+
+# per stage scatterplot 
+def plot_pairwise_celltypes_per_stage(
+    df: pd.DataFrame,
+    outdir: str = "plots/atac_pairwise_by_stage",
+    title_prefix: str = "ATAC",
+    sample: int | None = 200_000,
+    robust_limit: float = 0.999,
+    dpi: int = 200,
+    save: bool = True,
+    show: bool = False,
+    *,
+    label: str = "",
+    filename_prefix: str = "",
+    subdir: str | None = None,
+    # density controls
+    density: bool = True,
+    density_method: str = "hist",
+    density_bins: int = 80,
+    density_sigma: float = 2.0,
+    density_levels: tuple[float, ...] | None = (0.60, 0.80, 0.90, 0.97),
+    kde_bandwidth: float = 0.25,
+    kde_grid: int = 200,
+    # layout controls
+    figsize_scale: float = 1.0,   # multiplies base size
+    hspace: float = 0.45,         # vertical gap between subplots
+    wspace: float = 0.35,         # horizontal gap between subplots
+    suptitle_size: int = 16,
+    suptitle_y: float = 0.985,    # suptitle vertical position
+    top: float = 0.90             # leave room for suptitle
+):
+    save_dir = os.path.join(outdir, subdir) if (save and subdir) else outdir
+    if save:
+        os.makedirs(save_dir, exist_ok=True)
+
+    parsed = []
+    for col in df.columns:
+        if "_" in col:
+            stage, celltype = col.split("_", 1)
+            parsed.append((stage, celltype, col))
+    if not parsed:
+        raise ValueError("No columns matched '<stage>_<celltype>'.")
+
+    by_stage: dict[str, dict[str, str]] = {}
+    for stage, celltype, col in parsed:
+        by_stage.setdefault(stage, {})[celltype] = col
+
+    label_clean = label.strip()
+    label_for_title = f" — {label_clean}" if label_clean else ""
+    label_for_file  = ("_" + re.sub(r"[^A-Za-z0-9._-]+", "_", label_clean)) if label_clean else ""
+
+    def _stage_key(s):
+        try: return float(s)
+        except: return s
+
+    for stage in sorted(by_stage.keys(), key=_stage_key):
+        ct2col = by_stage[stage]
+        celltypes = sorted(ct2col.keys())
+        if len(celltypes) < 2:
+            continue
+
+        vals = df[[ct2col[ct] for ct in celltypes]].to_numpy()
+        upper = np.quantile(vals, robust_limit)
+        lims = (0.0, float(upper))
+
+        pairs = list(combinations(celltypes, 2))
+        n = len(pairs)
+        ncols = min(4, max(1, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
+
+        # --- bigger canvas + explicit gaps to avoid overlap ---
+        fig_w = (4.4 * ncols) * figsize_scale
+        fig_h = (4.0 * nrows) * figsize_scale + 0.8  # extra headroom for suptitle
+        fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+        axes = axes.ravel()
+
+        for ax, (ct1, ct2) in zip(axes, pairs):
+            x = df[ct2col[ct1]].to_numpy()
+            y = df[ct2col[ct2]].to_numpy()
+
+            if sample is not None and sample < len(x):
+                idx = np.random.choice(len(x), size=sample, replace=False)
+                x = x[idx]; y = y[idx]
+
+            ax.scatter(x, y, s=2, alpha=0.25, linewidths=0)
+            ax.plot(lims, lims, linestyle="--", linewidth=1.2, color="red")
+
+            if density:
+                if density_method == "hist":
+                    H, xedges, yedges = np.histogram2d(x, y, bins=density_bins, range=[lims, lims])
+                    H = _gaussian_smooth2d(H, sigma=density_sigma)
+                    pos = H[H > 0]
+                    levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                    if levels:
+                        X = 0.5 * (xedges[:-1] + xedges[1:])
+                        Y = 0.5 * (yedges[:-1] + yedges[1:])
+                        ax.contour(X, Y, H.T, levels=levels, linewidths=1.0, colors="black")
+                elif density_method == "kde":
+                    try:
+                        from sklearn.neighbors import KernelDensity
+                        gx = np.linspace(lims[0], lims[1], kde_grid)
+                        gy = np.linspace(lims[0], lims[1], kde_grid)
+                        XX, YY = np.meshgrid(gx, gy)
+                        grid = np.c_[XX.ravel(), YY.ravel()]
+                        kde = KernelDensity(bandwidth=kde_bandwidth, kernel="gaussian").fit(np.c_[x, y])
+                        ZZ = np.exp(kde.score_samples(grid)).reshape(XX.shape)
+                        pos = ZZ[ZZ > 0]
+                        levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                        if levels:
+                            ax.contour(XX, YY, ZZ, levels=levels, linewidths=1.0, colors="black")
+                    except Exception:
+                        H, xedges, yedges = np.histogram2d(x, y, bins=density_bins, range=[lims, lims])
+                        H = _gaussian_smooth2d(H, sigma=density_sigma)
+                        pos = H[H > 0]
+                        levels = [np.quantile(pos, q) for q in density_levels] if (density_levels and pos.size) else None
+                        if levels:
+                            X = 0.5 * (xedges[:-1] + xedges[1:])
+                            Y = 0.5 * (yedges[:-1] + yedges[1:])
+                            ax.contour(X, Y, H.T, levels=levels, linewidths=1.0, colors="black")
+
+            ax.set_xlim(lims); ax.set_ylim(lims)
+            ax.set_xlabel(ct1); ax.set_ylabel(ct2)
+
+            if x.size > 1 and y.size > 1:
+                r = np.corrcoef(x, y)[0, 1]
+                ax.text(0.04, 0.96, f"r={r:.2f}", transform=ax.transAxes, va="top")
+
+            ax.set_title(f"{ct1} vs {ct2}", fontsize=10)
+
+        for ax in axes[len(pairs):]:
+            ax.axis("off")
+
+        # layout & title (no overlap)
+        fig.tight_layout(pad=0.6)
+        fig.subplots_adjust(top=top, hspace=hspace, wspace=wspace)
+        fig.suptitle(f"{title_prefix}: stage {stage}{label_for_title}",
+                    y=suptitle_y, fontsize=suptitle_size)
+
+        if save:
+            safe_stage = re.sub(r"[^A-Za-z0-9._-]+", "_", str(stage))
+            fname = f"{filename_prefix}stage_{safe_stage}{label_for_file}_pairwise_celltypes.png"
+            out_path = os.path.join(save_dir, fname)
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved {out_path}")
+
+        if show:
+            plt.show()
+
+        plt.close(fig)
