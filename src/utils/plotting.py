@@ -628,6 +628,104 @@ def plot_pseudobulk_distributions(df, count_col, dataset_name, max_pseudobulks=N
         plt.show()
     else:
         plt.close()
+import os, numpy as np, matplotlib.pyplot as plt
+import pandas as pd
+from matplotlib.patches import Patch
+
+def plot_mean_accessibility_distributions_per_stage(
+    df: pd.DataFrame,
+    *,
+    group_by: str = "stage",           # "stage" -> boxes per celltype at each stage
+                                       # "celltype" -> boxes per stage at each celltype
+    title: str = "Pseudobulk distributions",
+    y_label: str = "Signal",
+    save_path: str | None = None,
+    show: bool = True,
+    figsize=(18, 10),
+    palette: str = "tab20",
+    showfliers: bool = False,
+    stage_filter=None,
+    celltype_filter=None,
+):
+    # parse "<stage>_<celltype>"
+    meta = []
+    for c in df.columns:
+        if "_" in c:
+            s, ct = c.split("_", 1)
+            meta.append((float(s), ct, c))
+    if not meta:
+        return None
+
+    # filters
+    if stage_filter is not None:
+        sf = set(map(float, stage_filter))
+        meta = [t for t in meta if t[0] in sf]
+    if celltype_filter is not None:
+        cf = set(celltype_filter)
+        meta = [t for t in meta if t[1] in cf]
+
+    stages = sorted({s for s, _, _ in meta}, key=float)
+    celltypes = []
+    for _, ct, _ in meta:
+        if ct not in celltypes:
+            celltypes.append(ct)
+
+    # mapping per x-axis key
+    if group_by == "stage":
+        x_keys = stages
+        sub_keys = celltypes
+        by = {s: {} for s in stages}
+        for s, ct, col in meta: by[s][ct] = col
+    else:
+        x_keys = celltypes
+        sub_keys = [str(s) for s in stages]
+        by = {ct: {} for ct in celltypes}
+        for s, ct, col in meta: by[ct][str(s)] = col
+
+    # colors for sub-groups (consistent across x)
+    cmap = plt.get_cmap(palette)(np.linspace(0, 1, len(sub_keys)))
+    sub_color = {k: cmap[i] for i, k in enumerate(sub_keys)}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    width_total = 0.8
+    box_w = width_total / max(len(sub_keys), 1)
+    offsets = np.linspace(-width_total/2 + box_w/2, width_total/2 - box_w/2, len(sub_keys))
+
+    for i, xk in enumerate(x_keys):
+        data, pos, cols = [], [], []
+        for j, sk in enumerate(sub_keys):
+            col = by[xk].get(sk) if group_by == "stage" else by[xk].get(sk)
+            if col is None: 
+                continue
+            v = df[col].to_numpy()             # all peaks
+            data.append(v)
+            pos.append(i + offsets[j])
+            cols.append(sub_color[sk])
+
+        bp = ax.boxplot(data, positions=pos, widths=box_w*0.9,
+                        showfliers=showfliers, patch_artist=True)
+        for patch, c in zip(bp["boxes"], cols):
+            patch.set_facecolor(c); patch.set_edgecolor("black"); patch.set_linewidth(0.6)
+        for k in ("whiskers","caps","medians"):
+            for line in bp[k]: line.set_color("black"); line.set_linewidth(0.6)
+
+    ax.set_xlabel("Stage (dpf)" if group_by=="stage" else "Cell type")
+    ax.set_ylabel(y_label)
+    ax.set_xticks(range(len(x_keys)))
+    ax.set_xticklabels([str(x) for x in x_keys], rotation=0 if group_by=="stage" else 25, ha="right")
+    ax.set_title(title)
+
+    handles = [Patch(facecolor=sub_color[k], edgecolor="black", label=k) for k in sub_keys]
+    ax.legend(handles=handles, title=("Cell type" if group_by=="stage" else "Stage (dpf)"),
+              bbox_to_anchor=(1.02,1), loc="upper left")
+    fig.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show: plt.show()
+    else: plt.close(fig)
+    return save_path
 
 def plot_reads_per_cell_by_celltype_and_stage_lifelong(
     df,

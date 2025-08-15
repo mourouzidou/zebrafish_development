@@ -1185,6 +1185,88 @@ def short_name(module: str,
     dtag = dataset.lower().replace(" ", "_")
     return f"train_{module}_L{length//1000}k_{asm}_{dtag}_{counts}_{lflag}_{qflag}"
 
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_pseudobulk_boxplot(
+    df,
+    *,
+    title: str = "Pseudobulk",
+    y_label: str = "Accessibility",
+    save_path: str | None = None,
+    cell_type_filter=None,
+    pseudobulk_counts: dict[str, int] | None = None,
+    order_by_counts: bool = True,
+    palette_name: str = "tab20c",
+    figsize: tuple[int, int] = (28, 10),
+    xtick_fontsize: int = 7,
+    color: str = "per-celltype",     # "per-celltype" or "single"
+    single_color = "lightgray",
+    show: bool = True,
+):
+    # parse cell type from "stage_celltype" column names
+    def _celltype_of(col: str) -> str:
+        parts = str(col).split("_")
+        return parts[1] if len(parts) > 1 else str(col)
+
+    # accept pandas or polars
+    cols = list(map(str, df.columns))
+
+    # order columns
+    if pseudobulk_counts is not None and order_by_counts:
+        cols = sorted(cols, key=lambda c: -pseudobulk_counts.get(c, 0))
+
+    # optional filter by cell types
+    cell_types = [_celltype_of(c) for c in cols]
+    if cell_type_filter is not None:
+        keep_idx = [i for i, ct in enumerate(cell_types) if ct in cell_type_filter]
+        cols = [cols[i] for i in keep_idx]
+        cell_types = [cell_types[i] for i in keep_idx]
+
+    # palette per cell type
+    unique_ct = list(dict.fromkeys(cell_types))
+    palette = dict(zip(unique_ct, sns.color_palette(palette_name, len(unique_ct))))
+    box_colors = [palette[ct] for ct in cell_types]
+
+    # x tick labels (+ n if provided)
+    x_labels = [f"{c}\n(n={pseudobulk_counts.get(c, 0)})" for c in cols] if pseudobulk_counts else cols
+
+    # to pandas (subset columns)
+    if hasattr(df, "select"):   # polars
+        df_plot = df.select(cols).to_pandas()
+    else:                       # pandas
+        df_plot = df[cols].copy()
+
+    # draw
+    plt.figure(figsize=figsize)
+    if color == "single":
+        ax = sns.boxplot(data=df_plot[cols], color=single_color)
+    else:
+        ax = sns.boxplot(data=df_plot[cols], palette=box_colors)
+
+    ax.set_title(title, fontsize=16)
+    ax.set_xlabel("Pseudobulk")
+    ax.set_ylabel(y_label)
+    ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=xtick_fontsize)
+    plt.tight_layout()
+
+    # save if requested
+    if save_path:
+        d = os.path.dirname(save_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+    return save_path if save_path else None
+
 
 # ------------ sequence extraction ------------
 
