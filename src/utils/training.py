@@ -1,6 +1,13 @@
 import torch
 import numpy as np
 import os
+import polars as pl
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
+import sys
+sys.path.append(os.path.abspath("../../src/utils"))
+
+from preprocess import *
 
 def pearson_corr_general(x, y):
     vx = x - torch.mean(x)
@@ -84,9 +91,13 @@ def train_model(
     return train_losses, val_losses, val_corrs_seq, val_corrs_type
 
 
+META_COLS: set[str] = {
+    "peak_id", "Peak", "chromosome", "end", "start", "sequence", "dataset"
+}
+
 
 def choose_holdout_chroms(chroms: np.ndarray, test_size: float,
-                          seed: int = 42) -> List[str]:
+                          seed: int = 42):
     """
     Pick a deterministic set of chromosomes whose row count sums to ~test_size of total.
     Returns a list of chromosome labels (as strings).
@@ -102,6 +113,21 @@ def choose_holdout_chroms(chroms: np.ndarray, test_size: float,
         if acc / total >= test_size:
             break
     return chosen
+import polars as pl
+def _build_output_root(base_name: str, output_dir: str | Path,
+                       test_size: float, split_mode: str) -> Path:
+    train_pct = int(round((1 - test_size) * 100))
+    test_pct = int(round(test_size * 100))
+    mode_lbl = "chrom_split" if split_mode == "chromosome" else "random"
+    root = Path(output_dir) / base_name / f"{train_pct}_{test_pct}_{mode_lbl}"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+def target_cols_from_schema(schema: dict[str, pl.DataType],
+                            exclude: Iterable[str] = META_COLS) -> List[str]:
+    """All numeric columns except metadata columns."""
+    excl = set(exclude)
+    return [c for c, dt in schema.items() if c not in excl and _is_numeric(dt)]
 
 
 def prepare_training_from_df(
@@ -209,6 +235,22 @@ def prepare_training_from_df(
 
     return root
 
+def _json_default(obj):
+    """Make numpy/polars scalars JSON-serializable for json.dump(default=_json_default)."""
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return str(obj)
+
+
+def _is_numeric(dt: pl.DataType) -> bool:
+    """Return True if a Polars dtype is integer or float (works across Polars versions)."""
+    return any(isinstance(dt, t) for t in (
+        pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+        pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+        pl.Float32, pl.Float64
+    ))
 
 def load_split_folder(split_dir: str | Path) -> dict[str, np.ndarray | list[str] | dict]:
     """
