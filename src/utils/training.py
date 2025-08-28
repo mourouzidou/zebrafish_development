@@ -1,10 +1,13 @@
+from __future__ import annotations
 import torch
 import numpy as np
 import os
 import polars as pl
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple,  Dict, Any
 import sys
+from torch.utils.data import DataLoader, TensorDataset
+
 sys.path.append(os.path.abspath("../../src/utils"))
 
 from preprocess import *
@@ -15,80 +18,169 @@ def pearson_corr_general(x, y):
     corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8)
     return corr
 
-def mean_pearson_correlation(loader, model, device, dim=1):
+def mean_pearson_correlation(loader, model, device, dim: int = 1) -> float:
+    """Compute mean Pearson r across sequences (dim=1) or across targets (dim=0)."""
+    import torch
     model.eval()
-    all_preds, all_targets = [], []
+    ys, yhats = [], []
     with torch.no_grad():
-        for batch_X, batch_y in loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            preds = model(batch_X)
-            all_preds.append(preds.cpu())
-            all_targets.append(batch_y.cpu())
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    if dim == 0:
-        return np.mean([
-            pearson_corr_general(all_preds[:, i], all_targets[:, i]).item()
-            for i in range(all_preds.shape[1])
-            if torch.std(all_targets[:, i]) > 0
-        ])
+        for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device)
+            yhat = model(xb)
+            ys.append(yb)
+            yhats.append(yhat)
+    y = torch.cat(ys, dim=0)
+    yhat = torch.cat(yhats, dim=0)
+
+    y = y - y.mean(dim=dim, keepdim=True)
+    yhat = yhat - yhat.mean(dim=dim, keepdim=True)
+    num = (y * yhat).sum(dim=dim)
+    den = torch.sqrt((y**2).sum(dim=dim) * (yhat**2).sum(dim=dim) + 1e-8)
+    r = num / den
+    return float(torch.nanmean(r).item())
+
+def make_loaders_from_arrays(
+    X_train: np.ndarray,
+    Y_train: np.ndarray,
+    *,
+    X_test: Optional[np.ndarray] = None,
+    Y_test: Optional[np.ndarray] = None,
+    batch_size: int = 64,
+    val_frac: float = 0.1,
+    use_test_as_val: bool = False,
+    num_workers: int = 0,
+    pin_memory: bool = True,
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    Build train/val DataLoaders from numpy arrays.
+    - If use_test_as_val=True and X_test/Y_test are provided, the *test* arrays are used as validation.
+    - Otherwise we split train into (train, val) by val_frac.
+    """
+    Xtr = torch.from_numpy(X_train).float()
+    Ytr = torch.from_numpy(Y_train).float()
+
+    if use_test_as_val and X_test is not None and Y_test is not None:
+        Xv = torch.from_numpy(X_test).float()
+        Yv = torch.from_numpy(Y_test).float()
+        train_ds = TensorDataset(Xtr, Ytr)
+        val_ds = TensorDataset(Xv, Yv)
     else:
-        return np.mean([
-            pearson_corr_general(all_preds[i], all_targets[i]).item()
-            for i in range(all_preds.shape[0])
-            if torch.std(all_targets[i]) > 0
-        ])
+        # carve validation out of training
+        N = Xtr.shape[0]
+        n_val = int(round(val_frac * N))
+        idx = torch.randperm(N)
+        val_idx = idx[:n_val]
+        tr_idx = idx[n_val:]
+        train_ds = TensorDataset(Xtr[tr_idx], Ytr[tr_idx])
+        val_ds   = TensorDataset(Xtr[val_idx], Ytr[val_idx])
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
+    return train_loader, val_loader
+
+def save_training_metadata(
+    out_dir: str | Path,
+    split_meta: dict,
+    model_hparams: dict,
+    train_hparams: dict,
+    history: dict,
+    best_model_path: str,
+):
+    """
+    Save a merged metadata file next to the model checkpoint.
+    """
+    from pathlib import Path
+    import json, datetime, platform, torch
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "system": {"python": platform.python_version(), "torch": torch.__version__},
+        "data_split": split_meta,             # copied from the split folder's meta.json
+        "model_hparams": model_hparams,       # e.g., sequence_length, n_targets, architecture flags
+        "training_hparams": train_hparams,    # e.g., batch_size, lr, weight_decay, loss, patience, epochs
+        "history": history,                   # losses and correlations per epoch
+        "best_model_path": str(best_model_path),
+    }
+    with open(out_dir / "training_config.json", "w") as f:
+        json.dump(payload, f, indent=2)
+
+
 
 def train_model(
-    model, train_loader, val_loader, criterion, optimizer,
-    num_epochs, early_stopping_patience, device, output_dir, model_name, sequence_length):
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    criterion,
+    optimizer,
+    num_epochs: int,
+    early_stopping_patience: int,
+    device: torch.device,
+    output_dir: str | Path,
+    model_name: str,
+    sequence_length: int,
+):
+    """
+    Standard train/validate loop with early stopping and pearson metrics.
+    Returns: (history dict, best_model_path)
+    """
+    import torch, os
     best_corr_sum = -float('inf')
     patience_counter = 0
-    train_losses, val_losses, val_corrs_seq, val_corrs_type = [], [], [], []
+    history: Dict[str, List[float]] = {
+        "train_loss": [], "val_loss": [], "val_corr_seq": [], "val_corr_type": []
+    }
+    output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
+    best_path = output_dir / f"{model_name}_{sequence_length}bp_best.pth"
 
-    for epoch in range(num_epochs):
+    for epoch in range(1, num_epochs + 1):
         model.train()
-        train_loss = 0.0
-        for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            loss = criterion(model(batch_X), batch_y)
+        running = 0.0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            yhat = model(xb)
+            loss = criterion(yhat, yb)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-        train_loss /= len(train_loader)
+            running += loss.item()
+        train_loss = running / max(1, len(train_loader))
 
         model.eval()
-        val_loss = 0.0
+        val_running = 0.0
         with torch.no_grad():
-            for batch_X, batch_y in val_loader:
-                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                val_loss += criterion(model(batch_X), batch_y).item()
-        val_loss /= len(val_loader)
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                val_running += criterion(model(xb), yb).item()
+        val_loss = val_running / max(1, len(val_loader))
 
-        corr_seq = mean_pearson_correlation(val_loader, model, device, dim=1)
+        corr_seq  = mean_pearson_correlation(val_loader, model, device, dim=1)
         corr_type = mean_pearson_correlation(val_loader, model, device, dim=0)
 
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        val_corrs_seq.append(corr_seq)
-        val_corrs_type.append(corr_type)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["val_corr_seq"].append(corr_seq)
+        history["val_corr_type"].append(corr_type)
 
-        print(f"Epoch {epoch+1} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Corr (Seq): {corr_seq:.4f} - Corr (Type): {corr_type:.4f}")
+        print(f"Epoch {epoch:03d} | Train {train_loss:.4f} | Val {val_loss:.4f} | "
+              f"r_seq {corr_seq:.4f} | r_type {corr_type:.4f}")
+
         corr_sum = corr_seq + corr_type
-
         if corr_sum > best_corr_sum:
             best_corr_sum = corr_sum
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(output_dir, f"{model_name}_{sequence_length}bp_best.pth"))
-            print(f"Model saved at epoch {epoch+1}")
+            torch.save(model.state_dict(), best_path)
+            print(f"  ✓ Saved best to {best_path}")
         else:
             patience_counter += 1
             if patience_counter >= early_stopping_patience:
-                print("Early stopping triggered.")
+                print("Early stopping.")
                 break
 
-    return train_losses, val_losses, val_corrs_seq, val_corrs_type
+    return history, str(best_path)
+
 
 
 META_COLS: set[str] = {
@@ -269,3 +361,12 @@ def load_split_folder(split_dir: str | Path) -> dict[str, np.ndarray | list[str]
         "X_test": X_test, "Y_test": Y_test,
         "targets": targets, "meta": meta,
     }
+
+def load_and_split_data(csv_path, sequence_length):
+
+    train_mask = df['chromosome'].isin(chroms[:split_idx]).values
+
+    val_mask = df['chromosome'].isin(chroms[split_idx:]).values
+
+    return X_tensor[train_mask], X_tensor[val_mask], y_tensor[train_mask], y_tensor[val_mask], df
+
