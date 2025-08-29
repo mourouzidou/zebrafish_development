@@ -33,6 +33,13 @@ def one_hot_encode(sequence):
     one_hot[n_mask] = 0.25
     return one_hot
 
+
+def reverse_complement_tensor(x):
+    """Apply reverse complement to one-hot encoded sequence tensor"""
+    rev_x = torch.flip(x, dims=[2])
+    rev_x = rev_x[:, [3, 2, 1, 0], :]
+    return rev_x
+
 ##__________________ATAC data preprocessing____________________
 
 def quantile_normalize(x, axis=0):
@@ -1185,11 +1192,6 @@ def short_name(module: str,
     dtag = dataset.lower().replace(" ", "_")
     return f"train_{module}_L{length//1000}k_{asm}_{dtag}_{counts}_{lflag}_{qflag}"
 
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 def plot_pseudobulk_boxplot(
     df,

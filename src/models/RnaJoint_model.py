@@ -13,21 +13,7 @@ warnings.filterwarnings('ignore')
 
 os.environ["TORCH_JIT_DISABLE_ONEDNN_FUSION"] = "1"
 
-# ---------------- Data Processing Functions ---------------- #
-def one_hot_encode(sequence):
-    """Convert DNA sequence to one-hot encoded format"""
-    mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
-    arr = np.zeros((len(sequence), 4), dtype=np.float32)
-    for i, char in enumerate(sequence):
-        if char in mapping:
-            arr[i, mapping[char]] = 1.0
-    return arr
 
-def reverse_complement_tensor(x):
-    """Apply reverse complement to one-hot encoded sequence tensor"""
-    rev_x = torch.flip(x, dims=[2])
-    rev_x = rev_x[:, [3, 2, 1, 0], :]
-    return rev_x
 
 def reduce_gene_expression_to_300(gene_expression_matrix, method='pca'):
     """
