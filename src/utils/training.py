@@ -6,11 +6,12 @@ import polars as pl
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple,  Dict, Any
 import sys
+import json, datetime, platform
 from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.append(os.path.abspath("../../src/utils"))
 
-from preprocess import *
+# from preprocess import *
 
 def pearson_corr_general(x, y):
     vx = x - torch.mean(x)
@@ -91,8 +92,6 @@ def save_training_metadata(
     """
     Save a merged metadata file next to the model checkpoint.
     """
-    from pathlib import Path
-    import json, datetime, platform, torch
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
@@ -133,7 +132,7 @@ def train_model(
         "train_loss": [], "val_loss": [], "val_corr_seq": [], "val_corr_type": []
     }
     output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
-    best_path = output_dir / f"{model_name}_{sequence_length}bp_best.pth"
+    best_path = output_dir / f"{model_name}_{sequence_length}bp_.pth"
 
     for epoch in range(1, num_epochs + 1):
         model.train()
@@ -362,11 +361,172 @@ def load_split_folder(split_dir: str | Path) -> dict[str, np.ndarray | list[str]
         "targets": targets, "meta": meta,
     }
 
-def load_and_split_data(csv_path, sequence_length):
+import os, json, torch, numpy as np
+from pathlib import Path
 
-    train_mask = df['chromosome'].isin(chroms[:split_idx]).values
+from models.dilated_baseline_model import ATACSeqCNN
 
-    val_mask = df['chromosome'].isin(chroms[split_idx:]).values
 
-    return X_tensor[train_mask], X_tensor[val_mask], y_tensor[train_mask], y_tensor[val_mask], df
+def plot_history(
+    history: dict,
+    out_dir: str | Path,
+    *,
+    dataset: str,
+    model_name: str,
+    run_id: str,
+    train_hparams: dict,
+):
+    """
+    Save two plots:
+      - losses.png  : Train vs Val loss per epoch
+      - correlations.png : r_seq and r_type per epoch
+    Titles include dataset, model, run_id, and key hyperparams.
+    Also writes history.csv for quick inspection.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    # history → DataFrame for convenience
+    df = pd.DataFrame(history)
+    df.index.name = "epoch"
+    df.to_csv(out_dir / "history.csv")
+
+    # Build a compact title suffix with key hparams
+    hp = train_hparams
+    hp_str = (f"loss={hp.get('loss','')}, bs={hp.get('batch_size','')}, "
+              f"lr={hp.get('lr','')}, wd={hp.get('weight_decay','')}, "
+              f"epochs={hp.get('num_epochs','')}, patience={hp.get('early_stopping_patience','')}, "
+              f"{hp.get('val_from','')}")
+
+    title_prefix = f"{dataset} • {model_name}\n{run_id}\n{hp_str}"
+
+    # --- Loss plot ---
+    plt.figure(figsize=(8,5))
+    plt.plot(df["train_loss"], label="Train loss")
+    plt.plot(df["val_loss"],   label="Val loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(f"{title_prefix}\nLoss curves")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "losses.png", dpi=150)
+    plt.close()
+
+    # --- Correlation plot ---
+    if "val_corr_seq" in df.columns and "val_corr_type" in df.columns:
+        plt.figure(figsize=(8,5))
+        plt.plot(df["val_corr_seq"],  label="r (per-sequence)")
+        plt.plot(df["val_corr_type"], label="r (per-celltype)")
+        plt.xlabel("Epoch")
+        plt.ylabel("Pearson r")
+        plt.title(f"{title_prefix}\nValidation correlations")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir / "correlations.png", dpi=150)
+        plt.close()
+
+def train_on_split(
+    split_dir: str | Path,
+    dataset: str,
+    *,
+    model_name: str = "dilated_baseline_model",
+    loss_name: str = "mse",                     # "mse" | "poisson_log"
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    use_test_as_val: bool = True,
+    val_frac: float = 0.1,                      # used only if use_test_as_val=False
+    num_epochs: int = 300,
+    early_stopping_patience: int = 10,
+):
+    """
+    Train on a prepared split folder (X/Y npy + meta.json) and save to:
+      ../src/models/outputs/<dataset>/<model_name>/<run_id>/
+    Returns the output run directory Path.
+    """
+    split_dir = Path(split_dir)
+    bundle = load_split_folder(split_dir)
+    X_train, Y_train = bundle["X_train"], bundle["Y_train"]
+    X_test,  Y_test  = bundle["X_test"],  bundle["Y_test"]
+    split_meta = bundle["meta"]
+
+    n_targets = Y_train.shape[1]
+    seq_len   = X_train.shape[2] if X_train.ndim == 3 else X_train.shape[-1]
+
+    # loaders
+    train_loader, val_loader = make_loaders_from_arrays(
+        X_train, Y_train,
+        X_test=X_test, Y_test=Y_test,
+        batch_size=batch_size,
+        use_test_as_val=use_test_as_val,
+        val_frac=val_frac,
+    )
+
+    # model + loss
+    model = ATACSeqCNN(sequence_length=seq_len, num_targets=n_targets)
+    if loss_name.lower() == "mse":
+        criterion = torch.nn.MSELoss()
+    elif loss_name.lower() == "poisson_log":
+        criterion = torch.nn.PoissonNLLLoss(log_input=True)  # model should output log-rate
+    else:
+        raise ValueError(f"Unknown loss_name: {loss_name}")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    # outputs: ../src/models/outputs/<dataset>/<model_name>/<run_id>/
+    parent_split = split_dir.parent.name          # e.g. train_atac_L2k_g11_...__seqs
+    split_name   = split_dir.name                 # e.g. 80_20_chrom_split
+    run_id = f"{parent_split}__{split_name}__{loss_name}"
+    out_dir = Path("../src/models/outputs") / dataset / model_name / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- train
+    history, best_path = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        num_epochs=num_epochs,
+        early_stopping_patience=early_stopping_patience,
+        device=device,
+        output_dir=out_dir,
+        model_name=model_name,
+        sequence_length=seq_len,
+    )
+
+    # ---- record metadata
+    model_hparams = {"sequence_length": int(seq_len), "num_targets": int(n_targets), "arch": model_name}
+    train_hparams = {
+        "batch_size": int(batch_size),
+        "optimizer": "AdamW",
+        "lr": float(lr),
+        "weight_decay": float(weight_decay),
+        "num_epochs": int(num_epochs),
+        "early_stopping_patience": int(early_stopping_patience),
+        "loss": "MSELoss" if loss_name.lower()=="mse" else "PoissonNLLLoss(log_input=True)",
+        "val_from": "test_set" if use_test_as_val else f"train_split(val_frac={val_frac})",
+    }
+    save_training_metadata(
+        out_dir=out_dir,
+        split_meta=split_meta,
+        model_hparams=model_hparams,
+        train_hparams=train_hparams,
+        history=history,
+        best_model_path=best_path,
+    )
+
+    # ---- plots + history.csv
+    plot_history(
+        history=history,
+        out_dir=out_dir,
+        dataset=dataset,
+        model_name=model_name,
+        run_id=run_id,
+        train_hparams=train_hparams,
+    )
+
+    print(f"[✓] Saved model, training_config.json, history.csv, and plots to: {out_dir}")
+    return out_dir
