@@ -9,9 +9,11 @@ import sys
 import json, datetime, platform
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
+
 import matplotlib.pyplot as plt
 
-sys.path.append(os.path.abspath("../../src/utils"))
+
+sys.path.append(os.path.abspath("../../src/"))
 
 # from preprocess import *
 
@@ -23,7 +25,6 @@ def pearson_corr_general(x, y):
 
 def mean_pearson_correlation(loader, model, device, dim: int = 1) -> float:
     """Compute mean Pearson r across sequences (dim=1) or across targets (dim=0)."""
-    import torch
     model.eval()
     ys, yhats = [], []
     with torch.no_grad():
@@ -427,6 +428,28 @@ def plot_history(
         plt.savefig(out_dir / "correlations.png", dpi=150)
         plt.close()
 
+from pathlib import Path
+import torch
+from pathlib import Path
+import json, hashlib, datetime
+import torch
+
+def _fmt_float(x: float) -> str:
+    # nice, stable float formatting for ids (1e-3, 5e-4, 0.001)
+    s = f"{x:.1e}"
+    # strip trailing zeros in mantissa (e.g., 1.0e-03 -> 1e-03)
+    s = s.replace("0e", "e").replace(".e", "e")
+    return s
+
+def _now_stamp() -> str:
+    # UTC timestamp for sorting; avoids collisions
+    return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+def _short_hash(payload: dict, n: int = 8) -> str:
+    # stable hash over the full metadata/hparams to prevent collisions
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:n]
+
 def train_on_split(
     split_dir: str | Path,
     dataset: str,
@@ -440,13 +463,28 @@ def train_on_split(
     val_frac: float = 0.1,                      # used only if use_test_as_val=False
     num_epochs: int = 300,
     early_stopping_patience: int = 10,
+    out_root: str | Path | None = None,         # defaults to <repo>/src/models/outputs
 ):
     """
-    Train on a prepared split folder (X/Y npy + meta.json) and save to:
-      ../src/models/outputs/<dataset>/<model_name>/<run_id>/
-    Returns the output run directory Path.
+    CWD-agnostic training that writes to:
+        <repo>/src/models/outputs/<dataset>/<model_name>/<run_id>/
+    with a compact, unique run_id that includes split, loss, hparams, and a timestamp+hash.
     """
+    # ---------- resolve repo & IO roots ----------
+    REPO = Path(__file__).resolve().parents[2]
     split_dir = Path(split_dir)
+    if not split_dir.is_absolute():
+        split_dir = (REPO / split_dir).resolve()
+
+    if out_root is None:
+        out_root = (REPO / "src" / "models" / "outputs").resolve()
+    else:
+        out_root = Path(out_root)
+        if not out_root.is_absolute():
+            out_root = (REPO / out_root).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # ---------- load data split ----------
     bundle = load_split_folder(split_dir)
     X_train, Y_train = bundle["X_train"], bundle["Y_train"]
     X_test,  Y_test  = bundle["X_test"],  bundle["Y_test"]
@@ -455,7 +493,7 @@ def train_on_split(
     n_targets = Y_train.shape[1]
     seq_len   = X_train.shape[2] if X_train.ndim == 3 else X_train.shape[-1]
 
-    # loaders
+    # ---------- data loaders ----------
     train_loader, val_loader = make_loaders_from_arrays(
         X_train, Y_train,
         X_test=X_test, Y_test=Y_test,
@@ -464,12 +502,14 @@ def train_on_split(
         val_frac=val_frac,
     )
 
-    # model + loss
+    # ---------- model + loss ----------
     model = ATACSeqCNN(sequence_length=seq_len, num_targets=n_targets)
     if loss_name.lower() == "mse":
         criterion = torch.nn.MSELoss()
+        loss_tag = "mse"
     elif loss_name.lower() == "poisson_log":
-        criterion = torch.nn.PoissonNLLLoss(log_input=True)  # model should output log-rate
+        criterion = torch.nn.PoissonNLLLoss(log_input=True)  # model outputs log-rate
+        loss_tag = "poisslog"
     else:
         raise ValueError(f"Unknown loss_name: {loss_name}")
 
@@ -477,14 +517,41 @@ def train_on_split(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # outputs: ../src/models/outputs/<dataset>/<model_name>/<run_id>/
-    parent_split = split_dir.parent.name          # e.g. train_atac_L2k_g11_...__seqs
-    split_name   = split_dir.name                 # e.g. 80_20_chrom_split
-    run_id = f"{parent_split}__{split_name}__{loss_name}"
-    out_dir = Path("../src/models/outputs") / dataset / model_name / run_id
+    # ---------- build a compact, unique run_id ----------
+    split_mode = split_meta.get("split_mode", "random")
+    train_pct  = split_meta.get("train_pct")
+    test_pct   = split_meta.get("test_pct")
+    split_tag  = f"{train_pct}_{test_pct}_{'chrom' if split_mode=='chromosome' else 'random'}"
+
+    val_tag = "val=test" if use_test_as_val else f"val={int(round(val_frac*100))}%"
+    id_core = {
+        "dataset": dataset,
+        "model_name": model_name,
+        "split": split_tag,
+        "loss": loss_tag,
+        "batch_size": batch_size,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "val_from": val_tag,
+        "num_epochs": num_epochs,
+        "patience": early_stopping_patience,
+        "seq_len": int(seq_len),
+        "n_targets": int(n_targets),
+        # input lineage:
+        "split_dir": str(split_dir),
+        "meta_random_state": split_meta.get("random_state"),
+        "holdout_chromosomes": split_meta.get("holdout_chromosomes"),
+        "targets": split_meta.get("targets"),
+    }
+    h = _short_hash(id_core, n=8)
+    stamp = _now_stamp()
+    run_id = f"{split_tag}__{loss_tag}__bs{batch_size}_lr{_fmt_float(lr)}_wd{_fmt_float(weight_decay)}__{val_tag}__{stamp}_{h}"
+
+    # ---------- output dir ----------
+    out_dir = out_root / dataset / model_name / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- train
+     # ---------- train ----------
     history, best_path = train_model(
         model=model,
         train_loader=train_loader,
@@ -499,7 +566,14 @@ def train_on_split(
         sequence_length=seq_len,
     )
 
-    # ---- record metadata
+    # ---- save best model with unique identifier
+    short_id = h[:4]  # first 4 chars of the run hash
+    ckpt_name = f"{model_name}_bs{batch_size}_lr{_fmt_float(lr)}_{loss_tag}_{short_id}.pth"
+    final_best = out_dir / ckpt_name
+    import shutil
+    shutil.copy2(best_path, final_best)
+
+    # ---------- metadata ----------
     model_hparams = {"sequence_length": int(seq_len), "num_targets": int(n_targets), "arch": model_name}
     train_hparams = {
         "batch_size": int(batch_size),
@@ -508,7 +582,7 @@ def train_on_split(
         "weight_decay": float(weight_decay),
         "num_epochs": int(num_epochs),
         "early_stopping_patience": int(early_stopping_patience),
-        "loss": "MSELoss" if loss_name.lower()=="mse" else "PoissonNLLLoss(log_input=True)",
+        "loss": "MSELoss" if loss_tag=="mse" else "PoissonNLLLoss(log_input=True)",
         "val_from": "test_set" if use_test_as_val else f"train_split(val_frac={val_frac})",
     }
     save_training_metadata(
@@ -517,10 +591,10 @@ def train_on_split(
         model_hparams=model_hparams,
         train_hparams=train_hparams,
         history=history,
-        best_model_path=best_path,
+        best_model_path=str(final_best),
     )
 
-    # ---- plots + history.csv
+    # ---------- plots + history.csv ----------
     plot_history(
         history=history,
         out_dir=out_dir,
@@ -530,5 +604,5 @@ def train_on_split(
         train_hparams=train_hparams,
     )
 
-    print(f"[✓] Saved model, training_config.json, history.csv, and plots to: {out_dir}")
+    print(f"[✓] Saved to: {out_dir}")
     return out_dir
