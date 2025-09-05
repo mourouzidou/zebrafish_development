@@ -1,0 +1,60 @@
+# Training CLI
+
+This repository provides a command-line interface to train deep learning models on prepared zebrafish ATAC-seq datasets.
+
+## Usage
+
+From the repository root, run:
+
+```bash
+python3 scripts/train.py \
+  --split_dir data/embryo/training/train_atac_L2k_g11_embryo_cpm_l1_q1__seqs/80_20_chrom_split \
+  --dataset embryo_cpm_l1_q1 \
+  --model_name dilated_baseline_model \
+  --loss_name mse \
+  --batch_size 64 \
+  --lr 1e-3 \
+  --weight_decay 1e-4 \
+  --use_test_as_val \
+  --num_epochs 300 \
+  --early_stopping_patience 10
+````
+
+## Arguments
+
+* `--split_dir` : Path to prepared training split folder (contains `X_train.npy`, `Y_train.npy`, `meta.json`, …).
+* `--dataset`   : Dataset tag for organizing outputs (e.g. `embryo_cpm_l1_q1`).
+* `--model_name`: Model architecture (`dilated_baseline_model`, `rna_onlySeq_model`, …).
+* `--loss_name` : Loss function (`mse` for log-normalized data, `poisson_log` for raw counts).
+* `--batch_size`: Training batch size.
+* `--lr`        : Learning rate.
+* `--weight_decay`: Weight decay for AdamW optimizer.
+* `--use_test_as_val`: If set, use the test split as validation. Otherwise, carve `--val_frac` from training.
+* `--val_frac`  : Fraction of training data used as validation (default 0.1).
+* `--num_epochs`: Maximum training epochs.
+* `--early_stopping_patience`: Stop if validation doesn’t improve for this many epochs.
+* `--cuda`      : Pin to a specific GPU (e.g. `--cuda 0`).
+
+## Outputs
+
+Each run is saved under:
+
+```
+src/models/outputs/<dataset>/<model_name>/<run_id>/
+```
+
+Where `<run_id>` includes:
+
+* split type (`80_20_chrom`, `80_20_random`),
+* loss,
+* batch size, lr, weight decay,
+* validation source,
+* timestamp and hash.
+
+Inside each run folder:
+
+* `*.pth` : model checkpoint with unique identifier.
+* `training_config.json` : metadata (data split, hyperparameters, history).
+* `history.csv` : per-epoch metrics.
+* `losses.png` : training/validation loss curves.
+* `correlations.png` : correlation metrics over epochs.
