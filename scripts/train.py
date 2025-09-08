@@ -1,14 +1,11 @@
-# scripts/train.py
 import os, sys, argparse
 from pathlib import Path
+from zebra_dev.utils import training
 
 THIS = Path(__file__).resolve()
 REPO = THIS.parents[1]              # zebrafish_development/ == repo root
 SRC  = REPO / "src"
 sys.path.insert(0, str(SRC))
-
-from utils.training import train_on_split
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split_dir", required=True)
@@ -23,7 +20,7 @@ def main():
     ap.add_argument("--num_epochs", type=int, default=300)
     ap.add_argument("--early_stopping_patience", type=int, default=10)
     ap.add_argument("--cuda", type=str, default="")
-    ap.add_argument("--out_root", default="src/models/outputs")  # repo-root relative by default
+    ap.add_argument("--out_root", default="runs")  # repo_root/runs relative by default
     args = ap.parse_args()
 
     if args.cuda:
@@ -37,7 +34,7 @@ def main():
     if not out_root.is_absolute():
         out_root = (REPO / out_root).resolve()
 
-    train_on_split(
+    training.train_on_split(
         split_dir=split_dir,
         dataset=args.dataset,
         model_name=args.model_name,

@@ -9,12 +9,7 @@ import sys
 import json, datetime, platform
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
-
 import matplotlib.pyplot as plt
-
-
-# sys.path.append(os.path.abspath("../../src/"))
-
 from .preprocess import *
 
 def pearson_corr_general(x, y):
@@ -450,20 +445,52 @@ def _short_hash(payload: dict, n: int = 8) -> str:
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:n]
 
+def _find_repo_root(start: Path | None = None, max_up: int = 6) -> Path | None:
+    """
+    Walk upward looking for a project root indicator (pyproject.toml or .git).
+    Returns the path if found, else None.
+    """
+    here = (start or Path.cwd()).resolve()
+    for _ in range(max_up):
+        if (here / "pyproject.toml").exists() or (here / ".git").exists():
+            return here
+        if here.parent == here:
+            break
+        here = here.parent
+    return None
+
+def _default_out_root() -> Path:
+    """
+    Priority:
+      1) ZEBRA_DEV_OUTPUTS env var
+      2) <repo>/runs (if repo root can be found)
+      3) ~/.zebra_dev/runs
+    """
+    env = os.getenv("ZEBRA_DEV_OUTPUTS")
+    if env:
+        return Path(env).expanduser().resolve()
+
+    repo = _find_repo_root()
+    if repo is not None:
+        return (repo / "runs").resolve()
+
+    # site-packages / unknown context
+    return (Path.home() / ".zebra_dev" / "runs").resolve()
+
 def train_on_split(
     split_dir: str | Path,
     dataset: str,
     *,
     model_name: str = "dilated_baseline_model",
-    loss_name: str = "mse",                     # "mse" | "poisson_log"
+    loss_name: str = "mse",
     batch_size: int = 64,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     use_test_as_val: bool = True,
-    val_frac: float = 0.1,                      # used only if use_test_as_val=False
+    val_frac: float = 0.1,
     num_epochs: int = 300,
     early_stopping_patience: int = 10,
-    out_root: str | Path | None = None,         # defaults to <repo>/src/models/outputs
+    out_root: str | Path | None = None,   # via _default_out_root()
 ):
     """
     CWD-agnostic training that writes to:
@@ -471,17 +498,22 @@ def train_on_split(
     with a compact, unique run_id that includes split, loss, hparams, and a timestamp+hash.
     """
     # ---------- resolve repo & IO roots ----------
-    REPO = Path(__file__).resolve().parents[2]
-    split_dir = Path(split_dir)
+    split_dir = Path(split_dir).expanduser()
     if not split_dir.is_absolute():
-        split_dir = (REPO / split_dir).resolve()
+        # anchor relative paths to detected repo root (best effort), else CWD
+        repo = _find_repo_root()
+        anchor = repo if repo is not None else Path.cwd()
+        split_dir = (anchor / split_dir).resolve()
+
 
     if out_root is None:
-        out_root = (REPO / "src" / "models" / "outputs").resolve()
+        out_root = _default_out_root()
     else:
-        out_root = Path(out_root)
+        out_root = Path(out_root).expanduser()
         if not out_root.is_absolute():
-            out_root = (REPO / out_root).resolve()
+            repo = _find_repo_root()
+            anchor = repo if repo is not None else Path.cwd()
+            out_root = (anchor / out_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
     # ---------- load data split ----------
