@@ -218,6 +218,122 @@ def target_cols_from_schema(schema: dict[str, pl.DataType],
     excl = set(exclude)
     return [c for c, dt in schema.items() if c not in excl and _is_numeric(dt)]
 
+from typing import Optional, List
+
+# Reuse helpers from your ATAC pipeline
+# (assumes you already have META_COLS, one_hot_batch, _build_output_root, target_cols_from_schema, _json_default, choose_holdout_chroms)
+
+def prepare_rna_training_from_csv(
+    csv_path: str | Path,
+    pattern: str,
+    output_dir: str | Path = "../../data/training/",
+    test_size: float = 0.2,
+    random_state: int = 42,
+    channel_first: bool = True,
+    split_mode: str = "random",                 # "random" | "chromosome"
+    holdout_chroms: Optional[List[str]] = None  # used when split_mode="chromosome"
+) -> Path:
+    """
+    From an RNA expression CSV with coordinates and sequence, produce X/Y numpy arrays + metadata.
+
+    - Targets = all numeric non-metadata columns.
+    - Inputs  = one-hot encodings of 'sequence'.
+    - Splitting:
+        * random: standard random split by rows.
+        * chromosome: hold out all rows from selected chromosomes (no leakage).
+          Column is called 'chrom' here instead of 'chromosome'.
+
+    Folder layout:
+        output_dir/
+          <base_name>/
+            <trainpct>_<testpct>_<mode>/
+              X_train.npy, Y_train.npy, X_test.npy, Y_test.npy,
+              target_columns.txt, meta.json
+
+    Returns:
+        Path to the split subfolder.
+    """
+    # ---- load CSV ----
+    df = pd.read_csv(csv_path)
+
+    if "sequence" not in df.columns:
+        raise ValueError("Input CSV must contain a 'sequence' column.")
+    if "chrom" not in df.columns:
+        raise ValueError("Input CSV must contain a 'chrom' column.")
+
+    base_name = pattern.replace("DATASET", "rna")
+    root = _build_output_root(base_name, output_dir, test_size, split_mode)
+
+    # Determine targets: all numeric columns except metadata
+    # Determine targets: all numeric columns except metadata
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    targets = [c for c in numeric_cols if c not in list(META_COLS) + ["start", "end"]]
+
+    if not targets:
+        raise ValueError("No numeric target columns found in RNA CSV.")
+
+    seqs = df["sequence"].astype(str).tolist()
+    Y = df[targets].to_numpy(dtype=np.float32)
+
+    N = len(seqs)
+    rng = np.random.default_rng(random_state)
+
+    # Split indices
+    if split_mode == "chromosome":
+        chroms = df["chrom"].astype(str).to_numpy()
+        if holdout_chroms is None:
+            holdout_chroms = choose_holdout_chroms(chroms, test_size, random_state)
+        test_mask = np.isin(chroms, holdout_chroms)
+        train_mask = ~test_mask
+        train_idx = np.nonzero(train_mask)[0]
+        test_idx = np.nonzero(test_mask)[0]
+
+        need = int(round(test_size * N)) - len(test_idx)
+        if need > 0 and len(train_idx) > 0:
+            extra = rng.choice(train_idx, size=min(need, len(train_idx)), replace=False)
+            test_idx = np.sort(np.concatenate([test_idx, extra]))
+            train_idx = np.array(sorted(set(train_idx) - set(extra)))
+    else:
+        perm = rng.permutation(N)
+        n_test = int(round(test_size * N))
+        test_idx, train_idx = np.sort(perm[:n_test]), np.sort(perm[n_test:])
+
+    # Slice & encode
+    seq_train = [seqs[i] for i in train_idx]
+    seq_test = [seqs[i] for i in test_idx]
+    Y_train, Y_test = Y[train_idx], Y[test_idx]
+
+    X_train = one_hot_batch(seqs=seq_train, channel_first=channel_first)
+    X_test = one_hot_batch(seqs=seq_test, channel_first=channel_first)
+
+    # Save arrays
+    np.save(root / "X_train.npy", X_train)
+    np.save(root / "Y_train.npy", Y_train)
+    np.save(root / "X_test.npy", X_test)
+    np.save(root / "Y_test.npy", Y_test)
+
+    # Save targets & meta
+    (root / "target_columns.txt").write_text("\n".join(targets))
+    meta = {
+        "base_name": base_name,
+        "N": int(N),
+        "seq_len": int(X_train.shape[2] if channel_first else X_train.shape[1]),
+        "n_targets": int(len(targets)),
+        "split_mode": split_mode,
+        "holdout_chromosomes": [str(c) for c in (holdout_chroms or [])]
+            if split_mode == "chromosome" else None,
+        "train_size": int(X_train.shape[0]),
+        "test_size": int(X_test.shape[0]),
+        "train_pct": int(round((1 - test_size) * 100)),
+        "test_pct": int(round(test_size * 100)),
+        "channel_first": bool(channel_first),
+        "targets": targets,
+        "random_state": int(random_state),
+    }
+    with open(root / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2, default=_json_default)
+
+    return root
 
 def prepare_training_from_df(
     df: pl.DataFrame,
