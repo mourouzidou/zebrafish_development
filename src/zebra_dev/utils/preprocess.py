@@ -16,6 +16,7 @@ from itertools import combinations
 import json
 import torch
 from typing import Iterable, List, Optional, Tuple
+from statsmodels.stats.multitest import multipletests
 
 
 META_COLS: set[str] = {
@@ -378,7 +379,8 @@ def extract_gene_info_from_gtf(gtf_path):
                 'end': end,
                 'tss_position': tss,
                 'gene_name': gene_name,
-                'gene_id': gene_id
+                'gene_id': gene_id,
+                'strand': strand
             })
 
     return pd.DataFrame(records)
@@ -882,6 +884,54 @@ def aggregate_and_merge_rna(rna_unmatched, rna_mean_all, cell_to_pseudobulk):
     return combined_data
 
 
+def find_marker_genes(rna_data, metadata_df, grouping_column, 
+                     cell_id_column='rna_matching_cell',
+                     pvalue_threshold=0.05, log_fc_threshold=0.5):
+    
+    # Create cell-to-group mapping and rename columns
+    cell_to_group = metadata_df.set_index(cell_id_column)[grouping_column].to_dict()
+    rna_data_grouped = rna_data.rename(columns=cell_to_group)
+    
+    # Compute group-level statistics
+    group_counts = rna_data_grouped.columns.value_counts()
+    rna_data_mean_group = rna_data_grouped.groupby(by=rna_data_grouped.columns, axis=1).mean()
+    rna_data_std_group = rna_data_grouped.groupby(by=rna_data_grouped.columns, axis=1).std()
+    
+    # Perform t-tests for each group
+    genes = rna_data_mean_group.index
+    groups = rna_data_mean_group.columns
+    marker_genes = {}
+    
+    for target_group in groups:        
+        other_groups = [group for group in groups if group != target_group]
+        
+        # Extract statistics for target group
+        mu1 = rna_data_mean_group[target_group]
+        sd1 = rna_data_std_group[target_group]
+        n1 = group_counts[target_group]
+    
+        mu2 = rna_data_mean_group[other_groups].mean(axis=1)
+        sd2 = rna_data_std_group[other_groups].mean(axis=1)
+        n2 = group_counts[other_groups].mean()
+        
+        # Welch's t-test with normal approximation
+        numerator = mu1 - mu2
+        denominator = np.sqrt((sd1 ** 2) / n1 + (sd2 ** 2) / n2)
+        t_stats = numerator / denominator
+        
+        t_stats = t_stats.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        p_values = 2 * (1 - norm.cdf(np.abs(t_stats)))
+        
+        _, pvals_corrected, _, _ = multipletests(p_values, method="fdr_bh")
+        
+        log_fc = mu1 - mu2
+        
+        mask = (pvals_corrected < pvalue_threshold) & (log_fc > log_fc_threshold)
+        marker_genes[target_group] = list(genes[mask])
+
+    
+    return marker_genes
 
 
 # ___________________________________________________________________________
@@ -1295,6 +1345,128 @@ def extract_sequences_once(base_df: pd.DataFrame,
     )
     seqs_df = seqs_df.set_index("peak_id")[["chromosome", "start", "end", "sequence"]]
     return seqs_df
+
+
+
+# sequence extraction for genes - rna data and flanking regions
+# src/zebra_dev/utils/sequence.py
+
+# import your existing helpersdef add_sequences_via_existing(
+    
+import os, re
+from pathlib import Path
+from typing import Optional, Dict
+import pandas as pd
+from Bio import SeqIO  
+from Bio.Seq import Seq
+
+
+
+def add_sequences_to_rna(
+    df: pd.DataFrame,
+    fasta_dir: str,
+    chrom_col: str = "chrom",
+    start_col: str = "start",
+    end_col: str = "end",
+    strand_col: str = "strand",
+    symmetric_bp: int = 0,
+    before_bp: int = 0,
+    after_bp: int = 0,
+    file_glob: str = "*.fa",
+    assume_1based_inclusive: bool = True,
+    save_dir: str | None = None,
+    base_name: str = "rna_with_gene_seq"
+) -> pd.DataFrame:
+    """
+    Extract sequences around TSS (strand-aware):
+      - '+' strand: TSS = start
+      - '-' strand: TSS = end
+
+    Expands before/after relative to TSS, optionally symmetric.
+    Keeps all original RNA expression columns, adds 'sequence'.
+    """
+
+    fasta_dir = Path(fasta_dir)
+    files = list(fasta_dir.glob(file_glob))
+    if not files:
+        raise FileNotFoundError(f"No FASTA files found in {fasta_dir}")
+
+    out = df.copy()
+    out["sequence"] = None
+
+    # expansion mode
+    if symmetric_bp > 0:
+        before_bp = after_bp = symmetric_bp
+
+    # build suffix for filename
+    if symmetric_bp > 0:
+        suffix = f"_ba{symmetric_bp}"
+    elif before_bp > 0 and after_bp > 0:
+        suffix = f"_ba{before_bp}_{after_bp}"
+    elif before_bp > 0:
+        suffix = f"_b{before_bp}"
+    elif after_bp > 0:
+        suffix = f"_a{after_bp}"
+    else:
+        suffix = "_ba0"
+
+    # map chromosome -> FASTA path
+    chrom2fa = {}
+    for f in files:
+        m = re.search(r"chromosome\.([0-9A-Za-z]+)\.fa$", f.name)
+        if m:
+            chrom2fa[m.group(1)] = f
+
+    # iterate chromosomes in df
+    for chrom_val, sub in out.groupby(chrom_col):
+        if pd.isna(chrom_val):
+            continue
+        chrom_str = str(chrom_val).strip()
+
+        if chrom_str not in chrom2fa:
+            print(f"[warn] No FASTA for chrom {chrom_str}, skipping")
+            continue
+
+        fasta_path = chrom2fa[chrom_str]
+        chrom_seq = str(next(SeqIO.parse(fasta_path, "fasta")).seq)
+        L = len(chrom_seq)
+
+        for idx, row in sub.iterrows():
+            s_val, e_val, strand = row[start_col], row[end_col], row[strand_col]
+            if pd.isna(s_val) or pd.isna(e_val) or pd.isna(strand):
+                continue
+
+            s, e = int(s_val), int(e_val)
+
+            # TSS depends on strand
+            tss = s if strand == "+" else e
+
+            if assume_1based_inclusive:
+                tss0 = tss - 1
+            else:
+                tss0 = tss
+
+            start0 = max(0, tss0 - before_bp)
+            end_ex = min(L, tss0 + after_bp)
+
+            seq = chrom_seq[start0:end_ex] if start0 < end_ex else None
+
+            # reverse-complement for negative strand
+            if strand == "-":
+                seq = str(Seq(seq).reverse_complement()) if seq else None
+
+            out.at[idx, "sequence"] = seq
+
+    # auto-save
+    if save_dir:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / f"{base_name}{suffix}.csv"
+        out.to_csv(save_path, index=False)
+        print(f"[✓] Saved to {save_path}")
+
+    return out
+
 
 # ------------ attach & save ------------
 
