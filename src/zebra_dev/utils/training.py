@@ -222,64 +222,49 @@ from typing import Optional, List
 
 # Reuse helpers from your ATAC pipeline
 # (assumes you already have META_COLS, one_hot_batch, _build_output_root, target_cols_from_schema, _json_default, choose_holdout_chroms)
-
 def prepare_rna_training_from_csv(
     csv_path: str | Path,
     pattern: str,
-    output_dir: str | Path = "../../data/training/",
+    output_dir: str | Path = "../../data/rna_training/",
     test_size: float = 0.2,
     random_state: int = 42,
     channel_first: bool = True,
     split_mode: str = "random",                 # "random" | "chromosome"
-    holdout_chroms: Optional[List[str]] = None  # used when split_mode="chromosome"
+    holdout_chroms: Optional[List[str]] = None
 ) -> Path:
     """
-    From an RNA expression CSV with coordinates and sequence, produce X/Y numpy arrays + metadata.
+    Prepare training arrays (X/Y) and metadata for RNA data from a CSV.
 
-    - Targets = all numeric non-metadata columns.
-    - Inputs  = one-hot encodings of 'sequence'.
+    - CSV must have a 'sequence' column and numeric expression columns.
     - Splitting:
-        * random: standard random split by rows.
-        * chromosome: hold out all rows from selected chromosomes (no leakage).
-          Column is called 'chrom' here instead of 'chromosome'.
-
-    Folder layout:
-        output_dir/
-          <base_name>/
-            <trainpct>_<testpct>_<mode>/
-              X_train.npy, Y_train.npy, X_test.npy, Y_test.npy,
-              target_columns.txt, meta.json
-
-    Returns:
-        Path to the split subfolder.
+        * random: row-wise random split.
+        * chromosome: hold out selected chromosomes.
     """
-    # ---- load CSV ----
+    csv_path = Path(csv_path)
     df = pd.read_csv(csv_path)
 
     if "sequence" not in df.columns:
-        raise ValueError("Input CSV must contain a 'sequence' column.")
-    if "chrom" not in df.columns:
-        raise ValueError("Input CSV must contain a 'chrom' column.")
+        raise ValueError("CSV must contain a 'sequence' column.")
 
     base_name = pattern.replace("DATASET", "rna")
     root = _build_output_root(base_name, output_dir, test_size, split_mode)
 
-    # Determine targets: all numeric columns except metadata
-    # Determine targets: all numeric columns except metadata
+    # Determine targets: all numeric columns except metadata, start, end, chrom
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     targets = [c for c in numeric_cols if c not in list(META_COLS) + ["start", "end"]]
-
     if not targets:
         raise ValueError("No numeric target columns found in RNA CSV.")
 
     seqs = df["sequence"].astype(str).tolist()
     Y = df[targets].to_numpy(dtype=np.float32)
-
     N = len(seqs)
+
     rng = np.random.default_rng(random_state)
 
     # Split indices
     if split_mode == "chromosome":
+        if "chrom" not in df.columns:
+            raise ValueError("split_mode='chromosome' requires a 'chrom' column in CSV.")
         chroms = df["chrom"].astype(str).to_numpy()
         if holdout_chroms is None:
             holdout_chroms = choose_holdout_chroms(chroms, test_size, random_state)
@@ -288,6 +273,7 @@ def prepare_rna_training_from_csv(
         train_idx = np.nonzero(train_mask)[0]
         test_idx = np.nonzero(test_mask)[0]
 
+        # Top up if test size undersampled
         need = int(round(test_size * N)) - len(test_idx)
         if need > 0 and len(train_idx) > 0:
             extra = rng.choice(train_idx, size=min(need, len(train_idx)), replace=False)
@@ -298,7 +284,7 @@ def prepare_rna_training_from_csv(
         n_test = int(round(test_size * N))
         test_idx, train_idx = np.sort(perm[:n_test]), np.sort(perm[n_test:])
 
-    # Slice & encode
+    # Slice and encode
     seq_train = [seqs[i] for i in train_idx]
     seq_test = [seqs[i] for i in test_idx]
     Y_train, Y_test = Y[train_idx], Y[test_idx]
@@ -314,10 +300,12 @@ def prepare_rna_training_from_csv(
 
     # Save targets & meta
     (root / "target_columns.txt").write_text("\n".join(targets))
+    seq_len = int(df["sequence"].astype(str).str.len().max())  
+
     meta = {
         "base_name": base_name,
         "N": int(N),
-        "seq_len": int(X_train.shape[2] if channel_first else X_train.shape[1]),
+        "seq_len": seq_len,
         "n_targets": int(len(targets)),
         "split_mode": split_mode,
         "holdout_chromosomes": [str(c) for c in (holdout_chroms or [])]
@@ -754,3 +742,244 @@ def train_on_split(
 
     print(f"[✓] Saved to: {out_dir}")
     return out_dir
+
+### __________________________________________________________________
+### __________________________________________________________________
+###             Combine ATAC + RNA
+### __________________________________________________________________
+### A) Expand sequence tensor of TSS flanking regions (RNA) with ATAC
+
+
+# ---------- helpers ----------
+
+def _one_hot_seq(seq: str, channel_first: bool = True) -> np.ndarray:
+    """Return 4×L (or L×4) float32 one-hot for A,C,G,T; others -> all zeros."""
+    seq = (seq or "").upper()
+    L = len(seq)
+    arr = np.zeros((4, L), dtype=np.float32)
+    m = {"A": 0, "C": 1, "G": 2, "T": 3}
+    for i, b in enumerate(seq):
+        j = m.get(b)
+        if j is not None:
+            arr[j, i] = 1.0
+    return arr if channel_first else arr.T
+
+def _parse_peak_series(peak: str) -> Tuple[str, int, int]:
+    """
+    Parse Peak strings like 'chr4:1234-5678' or '4:1234-5678'.
+    Returns (chrom, start, end), 1-based inclusive.
+    """
+    s = str(peak).strip().strip('"').strip("'")
+    m = re.search(r"(?:chr)?([0-9A-Za-z]+):(\d+)-(\d+)", s)
+    if not m:
+        raise ValueError(f"Unparsable peak: {peak}")
+    chrom = m.group(1)
+    start = int(m.group(2))
+    end   = int(m.group(3))
+    if end < start:
+        start, end = end, start
+    return chrom, start, end
+
+def _detect_numeric_targets(df: pd.DataFrame, exclude: Iterable[str]) -> List[str]:
+    exclude = set(exclude)
+    cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    return [c for c in cols if c not in exclude]
+
+# ----------------------------------------
+# main constructor
+# ----------------------------------------
+
+def build_seq_atac_tensors(
+    *,
+    rna_df: pd.DataFrame,                  # must contain: chrom, start, end, strand, sequence, and RNA targets
+    atac_df: pd.DataFrame,                 # must contain: Peak + K pseudobulk columns
+    atac_peak_col: str = "Peak",
+    atac_cols: Optional[List[str]] = None, # if None -> all numeric in atac_df
+    expr_cols: Optional[List[str]] = None, # if None -> all numeric in rna_df (excluding coords)
+    chrom_col: str = "chrom",
+    start_col: str = "start",
+    end_col: str = "end",
+    strand_col: str = "strand",
+    # How the TSS window for each row is computed:
+    #   If before_bp+after_bp (or symmetric_bp) > 0:   region = [TSS-before, TSS+after-1]
+    #   else:                                          region = [start, end]
+    symmetric_bp: int = 0,
+    before_bp: int = 0,
+    after_bp: int = 0,
+    use_seq_len_to_infer_span: bool = True,
+    # aggregation if multiple peaks cover the same base:
+    agg: str = "max",                      # "max" or "sum"
+    channel_first: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    """
+    Build X and Y arrays:
+
+      X shape: (N, C, L) if channel_first else (N, L, C)
+               where C = K (ATAC pseudobulks) + 4 (one-hot DNA)
+      Y shape: (N, T) where T = len(expr_cols)
+
+    Assumptions:
+      - rna_df['sequence'] is the exact DNA window used (TSS window or gene span).
+      - atac_df[atac_peak_col] are 1-based, inclusive intervals. Values in `atac_cols`
+        are the per-peak signals per pseudobulk (broadcast across the peak span).
+      - Chromosomes: we compare 'chrom' in rna_df to the parsed peak chrom
+        with 'chr' removed (i.e., 'chr4' and '4' are matched).
+    """
+    # resolve expansion parameters
+    if symmetric_bp and (before_bp or after_bp):
+        raise ValueError("Provide either symmetric_bp or (before_bp/after_bp), not both.")
+    if symmetric_bp > 0:
+        before_bp = after_bp = symmetric_bp
+
+    # choose columns
+    if atac_cols is None:
+        atac_cols = atac_df.select_dtypes(include=[np.number]).columns.tolist()
+    if not atac_cols:
+        raise ValueError("No numeric ATAC columns (pseudobulks) found.")
+
+    meta_cols_rna = {chrom_col, start_col, end_col, strand_col, "sequence"}
+    if expr_cols is None:
+        expr_cols = _detect_numeric_targets(rna_df, exclude=meta_cols_rna)
+    if not expr_cols:
+        raise ValueError("No numeric expression target columns found in RNA dataframe.")
+
+    # ----- preprocess ATAC peaks per chromosome -----
+    atac_df = atac_df.copy()
+    parsed = atac_df[atac_peak_col].apply(_parse_peak_series)
+    atac_df["_chrom"] = parsed.apply(lambda t: str(t[0]).replace("chr", "").strip())
+    atac_df["_start"] = parsed.apply(lambda t: int(t[1]))
+    atac_df["_end"]   = parsed.apply(lambda t: int(t[2]))
+    atac_df.sort_values(["_chrom", "_start", "_end"], inplace=True)
+
+    # dictionary: chrom -> array of (start,end,row_index)
+    chrom2rows: Dict[str, np.ndarray] = {}
+    for chrom, sub in atac_df.groupby("_chrom", sort=False):
+        chrom2rows[chrom] = sub[["_start", "_end"]].to_numpy(dtype=np.int64)
+    # keep a view to the counts matrix
+    atac_counts = atac_df[atac_cols].to_numpy(dtype=np.float32)
+    atac_row_offsets = (atac_df.reset_index().index.to_numpy())
+
+    # ----- iterate genes and construct tensors -----
+    N = rna_df.shape[0]
+    # L differs across genes; enforce constant L by trusting sequence length.
+    seq_lens = rna_df["sequence"].astype(str).str.len().to_numpy()
+    if not np.all(seq_lens == seq_lens[0]):
+        # variable-length windows -> you can bucket or pad; for now enforce equal
+        raise ValueError("Sequences have varying lengths. Generate a fixed window (e.g., symmetric_bp) first.")
+    L = int(seq_lens[0])
+
+    K = len(atac_cols)
+    C = K + 4
+
+    # allocate
+    if channel_first:
+        X = np.zeros((N, C, L), dtype=np.float32)
+    else:
+        X = np.zeros((N, L, C), dtype=np.float32)
+    Y = rna_df[expr_cols].to_numpy(dtype=np.float32)
+
+    # fast grouping by chromosome
+    for idx, row in rna_df.iterrows():
+        # --- region window for this gene ---
+        chrom = str(row[chrom_col]).strip()
+        s = int(row[start_col]); e = int(row[end_col])
+        strand = str(row.get(strand_col, "+")).strip()
+        seq = str(row["sequence"])
+        L_here = len(seq)
+        if L_here != L:
+            raise ValueError("Sequences must be equal length across rows.")
+
+        if before_bp > 0 or after_bp > 0:
+            # TSS-centered window
+            tss = s if strand == "+" else e
+            region_start = tss - before_bp
+            region_end   = tss + after_bp - 1  # 1-based inclusive
+            if use_seq_len_to_infer_span:
+                # trust sequence length for the end (handles off-by-ones)
+                region_end = region_start + L_here - 1
+        else:
+            # full gene span
+            region_start = s
+            region_end   = e
+            if region_end < region_start:
+                region_start, region_end = region_end, region_start
+            if use_seq_len_to_infer_span and L_here > 0:
+                # make end consistent with the sequence length
+                region_end = region_start + L_here - 1
+
+        # One-hot DNA (always last 4 channels)
+        DNA = _one_hot_seq(seq, channel_first=True)  # 4×L
+        if channel_first:
+            X[idx, K:K+4, :] = DNA
+        else:
+            X[idx, :, K:K+4] = DNA.T
+
+        # ATAC fill (first K channels)
+        # find ATAC peaks in the same chromosome
+        chr_key = chrom.replace("chr", "")
+        if chr_key not in chrom2rows:
+            # no peaks for this chrom
+            continue
+
+        peaks_arr = chrom2rows[chr_key]           # shape (M,2)
+        # binary search to find first peak ending after region_start
+        # (small, readable two-pointer scan works well too)
+        # We'll do a coarse scan: select candidates that start <= region_end and end >= region_start
+        # using vectorized boolean mask on peaks_arr (it's fast enough)
+        mask = (peaks_arr[:, 0] <= region_end) & (peaks_arr[:, 1] >= region_start)
+        if not mask.any():
+            continue
+
+        cand_idx = np.nonzero(mask)[0]
+        # Map to original rows to fetch counts
+        # We need the same selection on atac_df order
+        # atac_row_offsets aligns with peaks_arr order within each chrom group after groupby?
+        # Simpler: recompute mask on the grouped dataframe 'sub'
+        # We'll recover the sub-slice directly from atac_df using index matching:
+
+        # construct a boolean mask over atac_df for this chrom & overlap
+        sub_mask = (atac_df["_chrom"] == chr_key) & (atac_df["_start"] <= region_end) & (atac_df["_end"] >= region_start)
+        if not sub_mask.any():
+            continue
+
+        sub_rows = atac_df.loc[sub_mask, ["_start", "_end"]].to_numpy(dtype=np.int64)
+        sub_counts = atac_df.loc[sub_mask, atac_cols].to_numpy(dtype=np.float32)
+
+        # fill each overlapping peak
+        for (p_start, p_end), counts in zip(sub_rows, sub_counts):
+            # overlapping span in 1-based inclusive
+            ovl_start = max(region_start, p_start)
+            ovl_end   = min(region_end,   p_end)
+            if ovl_end < ovl_start:
+                continue
+            # convert to 0-based half-open indices in the gene window
+            left  = int(ovl_start - region_start)      # inclusive
+            right = int(ovl_end   - region_start + 1)  # exclusive
+
+            if channel_first:
+                if agg == "max":
+                    X_slice = X[idx, 0:K, left:right]
+                    X[idx, 0:K, left:right] = np.maximum(X_slice, counts[:, None])
+                else:  # sum
+                    X[idx, 0:K, left:right] += counts[:, None]
+            else:
+                if agg == "max":
+                    X_slice = X[idx, left:right, 0:K]
+                    X[idx, left:right, 0:K] = np.maximum(X_slice, counts[None, :])
+                else:
+                    X[idx, left:right, 0:K] += counts[None, :]
+
+    meta = {
+        "n_genes": int(N),
+        "seq_len": int(L),
+        "n_atac_channels": int(K),
+        "dna_channels": 4,
+        "channels_first": bool(channel_first),
+        "atac_cols": atac_cols,
+        "expr_cols": expr_cols,
+        "agg": agg,
+        "window_mode": "tss" if (before_bp > 0 or after_bp > 0) else "gene_span",
+        "before_bp": int(before_bp),
+        "after_bp": int(after_bp),
+    }
+    return X, Y, meta

@@ -1359,76 +1359,96 @@ from typing import Optional, Dict
 import pandas as pd
 from Bio import SeqIO  
 from Bio.Seq import Seq
+import re
+from pathlib import Path
+from typing import Optional
 
+import pandas as pd
+from Bio import SeqIO
+from Bio.Seq import Seq
 
 
 def add_sequences_to_rna(
     df: pd.DataFrame,
     fasta_dir: str,
+    *,
     chrom_col: str = "chrom",
     start_col: str = "start",
     end_col: str = "end",
     strand_col: str = "strand",
-    symmetric_bp: int = 0,
-    before_bp: int = 0,
+    # choose ONE of the two ways below:
+    symmetric_bp: int = 0,              # use ±symmetric_bp around TSS
+    before_bp: int = 0,                 # use before/after around TSS
     after_bp: int = 0,
     file_glob: str = "*.fa",
     assume_1based_inclusive: bool = True,
-    save_dir: str | None = None,
-    base_name: str = "rna_with_gene_seq"
+    save_dir: Optional[str] = None,
+    base_name: str = "rna_with_gene_seq",
 ) -> pd.DataFrame:
     """
-    Extract sequences around TSS (strand-aware):
+    Make a fixed-length, strand-aware TSS window for every row and store it in 'sequence'.
+
+    TSS definition:
       - '+' strand: TSS = start
       - '-' strand: TSS = end
 
-    Expands before/after relative to TSS, optionally symmetric.
-    Keeps all original RNA expression columns, adds 'sequence'.
+    Window length:
+      - If symmetric_bp > 0: length = 2 * symmetric_bp  ([-symmetric, +symmetric) around TSS)
+      - Else: length = before_bp + after_bp  ([-before, +after) around TSS)
+
+    Chromosome edges:
+      - If the requested window goes out of bounds, we pad with 'N' on the left/right to keep
+        the length exact. (In one-hot, map 'N' → uniform 0.25 per base.)
     """
 
-    fasta_dir = Path(fasta_dir)
-    files = list(fasta_dir.glob(file_glob))
-    if not files:
-        raise FileNotFoundError(f"No FASTA files found in {fasta_dir}")
-
-    out = df.copy()
-    out["sequence"] = None
-
-    # expansion mode
+    # ---- derive desired window spec ----
     if symmetric_bp > 0:
-        before_bp = after_bp = symmetric_bp
+        before_bp = symmetric_bp
+        after_bp = symmetric_bp
 
-    # build suffix for filename
+    total_len = before_bp + after_bp
+    if total_len <= 0:
+        raise ValueError(
+            "You must specify a positive window: set symmetric_bp > 0 or before_bp/after_bp > 0."
+        )
+
+    # build filename suffix reflecting the window
     if symmetric_bp > 0:
         suffix = f"_ba{symmetric_bp}"
     elif before_bp > 0 and after_bp > 0:
         suffix = f"_ba{before_bp}_{after_bp}"
     elif before_bp > 0:
         suffix = f"_b{before_bp}"
-    elif after_bp > 0:
-        suffix = f"_a{after_bp}"
     else:
-        suffix = "_ba0"
+        suffix = f"_a{after_bp}"
 
-    # map chromosome -> FASTA path
-    chrom2fa = {}
+    fasta_dir = Path(fasta_dir)
+    files = list(fasta_dir.glob(file_glob))
+    if not files:
+        raise FileNotFoundError(f"No FASTA files found in {fasta_dir}")
+
+    # Hard-coded chromosome name regex (e.g., Danio_rerio.GRCz11.dna.chromosome.14.fa)
+    chrom2fa: dict[str, Path] = {}
     for f in files:
         m = re.search(r"chromosome\.([0-9A-Za-z]+)\.fa$", f.name)
         if m:
             chrom2fa[m.group(1)] = f
 
-    # iterate chromosomes in df
+    out = df.copy()
+    out["sequence"] = None
+
+    # iterate by chromosome for speed
     for chrom_val, sub in out.groupby(chrom_col):
         if pd.isna(chrom_val):
             continue
-        chrom_str = str(chrom_val).strip()
+        chrom_key = str(chrom_val).strip()
 
-        if chrom_str not in chrom2fa:
-            print(f"[warn] No FASTA for chrom {chrom_str}, skipping")
+        fasta_path = chrom2fa.get(chrom_key)
+        if fasta_path is None:
+            print(f"[warn] No FASTA for chrom {chrom_key}, skipping")
             continue
 
-        fasta_path = chrom2fa[chrom_str]
-        chrom_seq = str(next(SeqIO.parse(fasta_path, "fasta")).seq)
+        chrom_seq = str(next(SeqIO.parse(fasta_path, "fasta")).seq)  # uppercase letters
         L = len(chrom_seq)
 
         for idx, row in sub.iterrows():
@@ -1437,31 +1457,52 @@ def add_sequences_to_rna(
                 continue
 
             s, e = int(s_val), int(e_val)
+            strand = str(strand).strip()
+            if strand not in {"+", "-"}:
+                continue
 
-            # TSS depends on strand
+            # pick TSS per strand
             tss = s if strand == "+" else e
+            tss0 = tss - 1 if assume_1based_inclusive else tss  # 0-based coord
 
-            if assume_1based_inclusive:
-                tss0 = tss - 1
-            else:
-                tss0 = tss
+            # desired (0-based, half-open) window [des_start, des_end)
+            des_start = tss0 - before_bp
+            des_end   = tss0 + after_bp
 
-            start0 = max(0, tss0 - before_bp)
-            end_ex = min(L, tss0 + after_bp)
+            # clip to chromosome & compute needed paddings
+            clip_start = max(0, des_start)
+            clip_end   = min(L, des_end)
 
-            seq = chrom_seq[start0:end_ex] if start0 < end_ex else None
+            left_pad  = max(0, 0 - des_start)
+            right_pad = max(0, des_end - L)
 
-            # reverse-complement for negative strand
+            # extract + pad to exact length
+            core = chrom_seq[clip_start:clip_end] if clip_start < clip_end else ""
+            seq  = ("N" * left_pad) + core + ("N" * right_pad)
+
+            # Safety: enforce exact length
+            if len(seq) != total_len:
+                # If something goes odd due to extreme coords, fix length deterministically
+                if len(seq) < total_len:
+                    seq = seq + ("N" * (total_len - len(seq)))
+                else:
+                    # extra chars: trim symmetrically around the center of the window
+                    over = len(seq) - total_len
+                    trim_left = over // 2
+                    trim_right = over - trim_left
+                    seq = seq[trim_left: len(seq) - trim_right]
+
+            # reverse-complement for negative strand (keeps 'N' as 'N')
             if strand == "-":
-                seq = str(Seq(seq).reverse_complement()) if seq else None
+                seq = str(Seq(seq).reverse_complement())
 
             out.at[idx, "sequence"] = seq
 
-    # auto-save
+    # optional save
     if save_dir:
-        save_dir = Path(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        save_path = save_dir / f"{base_name}{suffix}.csv"
+        save_p = Path(save_dir)
+        save_p.mkdir(parents=True, exist_ok=True)
+        save_path = save_p / f"{base_name}{suffix}.csv"
         out.to_csv(save_path, index=False)
         print(f"[✓] Saved to {save_path}")
 
