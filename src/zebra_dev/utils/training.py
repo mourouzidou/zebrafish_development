@@ -242,7 +242,7 @@ def prepare_rna_training_from_csv(
     """
     csv_path = Path(csv_path)
     df = pd.read_csv(csv_path)
-
+    META_COLS = {'chrom',	'start',	'end',	'tss_position',	'gene_id',	'strand',	'sequence'}
     if "sequence" not in df.columns:
         raise ValueError("CSV must contain a 'sequence' column.")
 
